@@ -1,0 +1,31 @@
+[package]
+name = "ruffle_render_glow"
+authors = ["Ruffle LLC <ruffle@ruffle.rs>"]
+edition = "2021"
+homepage = "https://ruffle.rs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ruffle-rs/ruffle"
+version = "0.1.0"
+
+[lints.rust]
+# Clippy nightly often adds new/buggy lints that we want to ignore.
+# Don't warn about these new lints on stable.
+renamed_and_removed_lints = "allow"
+unknown_lints = "allow"
+
+[lints.clippy]
+# LONG-TERM: These lints are unhelpful.
+manual_map = "allow"             # Less readable: Suggests `opt.map(..)` instead of `if let Some(opt) { .. }`
+manual_range_contains = "allow"  # Less readable: Suggests `(a..b).contains(n)` instead of `n >= a && n < b`
+assigning_clones = "allow"       # Sometimes useful, but more often than not it doesn't do anything as
+                                 # we overwrite an empty item. And sometimes it can even be a footgun
+                                 # by keeping big allocations alive.
+
+[dependencies]
+log = "0.4"
+glow = { git = "https://github.com/grovesNL/glow", branch = "main", features = [] }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = ["tessellator"] }
+bytemuck = { version = "1.23.2", features = ["derive"] }
+swf = { git = "https://github.com/ruffle-rs/ruffle", branch = "master" }
+thiserror = "2.0.16"
+image = { version = "0.25.6", default-features = false }

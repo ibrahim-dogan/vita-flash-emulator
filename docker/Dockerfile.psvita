@@ -1,0 +1,52 @@
+# FlashVita build image: VitaSDK + Rust "vita" nightly target + the native
+# graphics/audio stack (SDL2 with the vitaGL backend, vitaShaRK, vitaGL),
+# then a release build of ./emulator packaged as a VPK.
+FROM ghcr.io/vita-rust/vitasdk-rs:latest
+
+RUN apk add --no-cache \
+        openjdk11 \
+        cmake \
+        samurai \
+        git \
+        bash \
+        build-base
+
+# --- Northfear's SDL2 fork with the VITA_VGL video backend -----------------
+RUN git clone --depth=1 https://github.com/Northfear/SDL /opt/SDL && \
+    cd /opt/SDL && \
+    cmake -S. -Bbuild \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_TOOLCHAIN_FILE=${VITASDK}/share/vita.toolchain.cmake \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DVIDEO_VITA_VGL=ON \
+        -G Ninja && \
+    cmake --build build --parallel "$(nproc)" && \
+    cmake --install build
+
+# --- vitaShaRK (runtime shader compiler used by vitaGL) ---------------------
+RUN git clone --depth=1 https://github.com/Rinnegatamante/vitaShaRK /opt/vitaShaRK && \
+    cd /opt/vitaShaRK && \
+    make install -j"$(nproc)"
+
+# --- vitaGL -----------------------------------------------------------------
+# HAVE_GLSL_SUPPORT: our shaders are GLSL ES 1.00 and must be translated.
+# NO_DEBUG: drops per-call error checking/logging (a large CPU cost).
+# NO_SPLASHSCREEN: no animated vitaGL logo at boot.
+# The rest matches what ruffle4consoles was tuned and tested with.
+RUN git clone --depth=1 https://github.com/Rinnegatamante/vitaGL /opt/vitaGL && \
+    cd /opt/vitaGL && \
+    make NO_SPLASHSCREEN=1 HAVE_GLSL_SUPPORT=1 NO_DEBUG=1 PRIMITIVES_SPEEDHACK=1 CIRCULAR_VERTEX_POOL=2 \
+         USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 install -j"$(nproc)"
+
+# --- FlashVita --------------------------------------------------------------
+COPY emulator /opt/flashvita
+WORKDIR /opt/flashvita
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/opt/flashvita/target \
+    ./build_psp2.sh && \
+    mkdir -p /out && \
+    cp target/armv7-sony-vita-newlibeabihf/vita/flashvita.vpk /out/ && \
+    cp target/armv7-sony-vita-newlibeabihf/vita/flashvita.self /out/
+
+CMD ["sh", "-c", "cp -v /out/* /dist/"]

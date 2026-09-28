@@ -1,0 +1,75 @@
+[package]
+name = "flashvita"
+version = "1.0.0"
+authors = ["İbrahim Doğan"]
+edition = "2024"
+
+[dependencies]
+sdl2 = { version = "0.38.0", features = ["static-link", "use-pkgconfig"] }
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = [
+    "audio",
+    "symphonia",
+    "mp3",
+    "aac",
+    "nellymoser",
+    "lzma",
+    "default_compatibility_rules",
+    "default_font",
+] }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", branch = "master" }
+swf = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = ["lzma"] }
+ruffle_render_glow = { path = "ruffle_render_glow" }
+glow = { git = "https://github.com/grovesNL/glow", branch = "main", features = [] }
+anyhow = "1.0"
+fontdue = "0.9"
+flate2 = "1.1"
+ron = "0.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tracing = { version = "0.1.43", features = ["log"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.7"
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+# Only needed to spell out NavigatorBackend's signatures; versions match ruffle_core's.
+async-channel = "2.5"
+encoding_rs = "0.8"
+indexmap = "2.12"
+
+[target.armv7-sony-vita-newlibeabihf.dependencies]
+vitasdk-sys = { version = "0.3.2", features = [
+    "SceLibKernel_stub",
+    "SceKernelThreadMgr_stub",
+    "ScePower_stub",
+    "SceRtc_stub",
+] }
+
+[patch.crates-io]
+# Single-threaded JPEG decoding on Vita; see patches/jpeg-decoder/src/decoder.rs.
+jpeg-decoder = { path = "patches/jpeg-decoder" }
+
+# Desktop builds can dump screenshots (FLASHVITA_SCRIPT), used for development.
+[target.'cfg(not(target_os = "vita"))'.dependencies]
+png = "0.18"
+
+[package.metadata.vita]
+title_id = "FLASHVITA"
+title_name = "FlashVita"
+assets = "./static/vita"
+build_std = "std,panic_abort"
+
+[package.metadata.vita.profile.vita]
+strip_symbols = true
+
+[profile.dev]
+# Ruffle is unusably slow unoptimised; keep our own crate debuggable.
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.vita]
+inherits = "release"
