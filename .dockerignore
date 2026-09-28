@@ -1,0 +1,5 @@
+dist/
+.git/
+emulator/target/
+emulator/ruffle/
+emulator/ux0:data/
