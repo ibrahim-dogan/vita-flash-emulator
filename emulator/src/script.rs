@@ -15,6 +15,9 @@ enum Step {
     Press(Btn),
     Hold(Btn, u32),
     Tap(f32, f32),
+    /// Text typed on a keyboard; `_` stands for a space.
+    Type(String),
+    Enter,
     Shot(String),
     Record(Option<String>),
     Quit,
@@ -52,6 +55,8 @@ impl Script {
                 ["press", b] => parse_btn(b).map(Step::Press),
                 ["hold", b, n] => parse_btn(b).zip(n.parse().ok()).map(|(b, n)| Step::Hold(b, n)),
                 ["tap", x, y] => x.parse().ok().zip(y.parse().ok()).map(|(x, y)| Step::Tap(x, y)),
+                ["type", text] => Some(Step::Type(text.replace('_', " "))),
+                ["enter"] => Some(Step::Enter),
                 ["shot", path] => Some(Step::Shot((*path).to_owned())),
                 ["rec", dir] => Some(Step::Record(Some((*dir).to_owned()))),
                 ["stoprec"] => Some(Step::Record(None)),
@@ -106,6 +111,14 @@ impl Script {
             Some(Step::Tap(x, y)) => {
                 input.inject_touch(TouchPhase::Down, x, y);
                 self.touch_up = Some((x, y));
+                self.wait = 2;
+            }
+            Some(Step::Type(text)) => {
+                input.inject_event(crate::input::InputEvent::Text(text));
+                self.wait = 2;
+            }
+            Some(Step::Enter) => {
+                input.inject_event(crate::input::InputEvent::Enter);
                 self.wait = 2;
             }
             Some(Step::Shot(p)) => return Output::Screenshot(p),

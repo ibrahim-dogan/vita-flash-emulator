@@ -26,17 +26,26 @@ pub fn path(game_key: &str) -> PathBuf {
 }
 
 pub fn save(game_key: &str, img: &Image, kind: ThumbKind) -> std::io::Result<()> {
+    write(&path(game_key), img, kind)
+}
+
+pub fn load(game_key: &str) -> Option<(Image, ThumbKind)> {
+    read(&path(game_key))
+}
+
+/// Writes a thumbnail file anywhere (Explore keeps its covers apart).
+pub fn write(path: &std::path::Path, img: &Image, kind: ThumbKind) -> std::io::Result<()> {
     let mut out = Vec::with_capacity(12 + img.rgba.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(img.w as u16).to_le_bytes());
     out.extend_from_slice(&(img.h as u16).to_le_bytes());
     out.extend_from_slice(&[kind as u8, 0, 0, 0]);
     out.extend_from_slice(&img.rgba);
-    std::fs::write(path(game_key), out)
+    std::fs::write(path, out)
 }
 
-pub fn load(game_key: &str) -> Option<(Image, ThumbKind)> {
-    let data = std::fs::read(path(game_key)).ok()?;
+pub fn read(path: &std::path::Path) -> Option<(Image, ThumbKind)> {
+    let data = std::fs::read(path).ok()?;
     if data.len() < 12 || &data[..4] != MAGIC {
         return None;
     }

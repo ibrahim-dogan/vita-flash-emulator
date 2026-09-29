@@ -7,53 +7,46 @@
 use glow::HasContext;
 
 use crate::platform::SCREEN_H;
-use crate::ui::{self, Color, FontId, Gfx, Rect, theme};
+use crate::ui::{self, Color, FontId, Gfx, Pattern, Rect, theme};
 
 fn backdrop(g: &mut Gfx, w: f32, h: f32) {
-    g.rect_v(Rect::new(0.0, 0.0, w, h), theme::BG_TOP, theme::BG_BOTTOM);
-    g.glow(w * 0.18, 0.0, w * 0.5, h * 0.45, theme::ACCENT.alpha(0.28));
-    g.glow(w * 0.92, h, w * 0.45, h * 0.45, theme::ACCENT2.alpha(0.24));
+    let r = Rect::new(0.0, 0.0, w, h);
+    g.rect(r, theme::BLUE);
+    g.pattern(Pattern::Dots, r, theme::PAPER.alpha(0.10));
 }
 
 fn icon0(g: &mut Gfx) {
-    // LiveArea shows this inside a circle: keep the mark centred, full bleed.
-    let r = Rect::new(0.0, 0.0, 128.0, 128.0);
-    g.rect_h(r, theme::ACCENT, theme::ACCENT2);
-    g.rect_v(Rect::new(0.0, 0.0, 128.0, 64.0), Color::hex(0xFFFFFF).alpha(0.12), Color::hex(0xFFFFFF).alpha(0.0));
-    let s = 70.0;
-    let (x, y) = (29.0 + 3.0, 29.0);
-    g.icon(ui::Icon::Play, x, y + 4.0, s, Color::hex(0x1A1040).alpha(0.35));
-    g.icon(ui::Icon::Play, x, y, s, Color::hex(0xFFFFFF));
+    // LiveArea shows this inside a circle: keep the mark centred.
+    backdrop(g, 128.0, 128.0);
+    let s = 80.0;
+    // Nudge up-left so the mark and its shadow are centred together.
+    ui::logo(g, Rect::new(64.0 - s * 0.5 - 4.0, 64.0 - s * 0.5 - 4.0, s, s));
 }
 
-fn wordmark(g: &mut Gfx, cx: f32, cy: f32, logo: f32, px: f32) {
-    let tw = g.measure(FontId::Bold, px, "RuffleVita");
-    let gap = logo * 0.32;
-    let total = logo + gap + tw;
-    let x = cx - total * 0.5;
-    ui::logo(g, Rect::new(x, cy - logo * 0.5, logo, logo));
-    g.text_mid(FontId::Bold, px, x + logo + gap, cy, theme::TEXT, "RuffleVita");
+fn wordmark_centered(g: &mut Gfx, cx: f32, cy: f32, size: f32) {
+    let w = ui::wordmark_width(g, size);
+    ui::wordmark(g, (cx - w * 0.5).round(), cy, size);
 }
 
 fn pic0(g: &mut Gfx) {
     let (w, h) = (960.0, 544.0);
     backdrop(g, w, h);
-    wordmark(g, w * 0.5, 230.0, 96.0, 64.0);
-    g.text_mid_center(FontId::Regular, 22.0, w * 0.5, 320.0, theme::DIM, "Flash games on your PS Vita");
-    g.text_mid_center(FontId::Regular, 17.0, w * 0.5, h - 40.0, theme::FAINT, ui::CREDIT);
+    wordmark_centered(g, w * 0.5, 232.0, 92.0);
+    ui::shadow_text_center(g, FontId::Display, 30.0, w * 0.5, 330.0, theme::SUN, "Flash games on your PS Vita");
+    g.text_mid_center(FontId::Bold, 18.0, w * 0.5, h - 40.0, theme::ON_BLUE_DIM, ui::CREDIT);
 }
 
 fn bg0(g: &mut Gfx) {
     let (w, h) = (840.0, 500.0);
     backdrop(g, w, h);
-    g.text_mid_right(FontId::Regular, 16.0, w - 28.0, h - 26.0, theme::FAINT, ui::CREDIT);
+    g.text_mid_right(FontId::Bold, 16.0, w - 28.0, h - 26.0, theme::ON_BLUE_DIM, ui::CREDIT);
 }
 
 fn startup(g: &mut Gfx) {
     let (w, h) = (280.0, 158.0);
     backdrop(g, w, h);
-    wordmark(g, w * 0.5, 70.0, 46.0, 30.0);
-    g.text_mid_center(FontId::Regular, 13.0, w * 0.5, 124.0, theme::DIM, ui::CREDIT);
+    wordmark_centered(g, w * 0.5, 66.0, 42.0);
+    g.text_mid_center(FontId::Bold, 13.0, w * 0.5, 126.0, theme::PAPER, ui::CREDIT);
 }
 
 fn save(gl: &glow::Context, w: u32, h: u32, path: &std::path::Path) {

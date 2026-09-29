@@ -110,7 +110,11 @@ fn extract_title(xml: &str) -> Option<String> {
 /// movie body is inflated for zlib files, so this is fast even for 100 MB
 /// games.
 pub fn read_info(path: &Path) -> Result<SwfInfo, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    read_info_from(std::fs::File::open(path).map_err(|e| e.to_string())?)
+}
+
+/// [`read_info`] for any source, e.g. the first few KB of a download.
+pub fn read_info_from(mut file: impl Read) -> Result<SwfInfo, String> {
     let mut head = [0u8; 8];
     file.read_exact(&mut head).map_err(|_| "File is too small to be a SWF".to_string())?;
     let compression = head[0] as char;

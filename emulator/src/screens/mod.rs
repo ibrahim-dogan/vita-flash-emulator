@@ -1,5 +1,6 @@
 //! Full-screen views and modal overlays.
 
+pub mod explore;
 pub mod keypicker;
 pub mod library;
 pub mod loading;
@@ -9,10 +10,51 @@ pub mod settings;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::library::Library;
+use crate::platform::SCREEN_W;
 use crate::swfinfo::Image;
 use crate::thumbs::ThumbKind;
-use crate::ui::{Gfx, Texture};
+use crate::ui::{self, FontId, Gfx, Rect, Texture, theme};
 use crate::worker::{Job, Worker};
+
+/// The two top-level screens, switched with L and R.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Library,
+    Explore,
+}
+
+/// Wordmark, Library/Explore tabs, a note (e.g. "12 games") and the clock.
+/// Returns the tab rectangles, for touch.
+pub fn top_bar(g: &mut Gfx, active: Tab, note: &str) -> Vec<Rect> {
+    let cy = 35.0;
+    let w = ui::wordmark(g, 20.0, cy, 32.0);
+    let names = ["Library", "Explore"];
+    let rects = ui::tabs(g, 20.0 + w + 26.0, cy, &names, active as usize);
+    if let Some(last) = rects.last() {
+        let x = last.right() + 22.0 + ui::button_glyph_width(g, crate::input::Btn::R, 22.0) + 16.0;
+        let max_w = SCREEN_W as f32 - 180.0 - x;
+        let note = g.ellipsize(FontId::Bold, 14.0, note, max_w);
+        g.text_mid(FontId::Bold, 14.0, x, cy, theme::ON_BLUE_DIM, &note);
+    }
+    ui::status(g, SCREEN_W as f32 - 22.0, cy);
+    rects
+}
+
+/// Seconds since the app started, for animations.
+pub fn time_secs() -> f32 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f32()
+}
+
+/// A thin ink scrollbar along the right edge of `area`.
+pub fn scrollbar(g: &mut Gfx, area: Rect, scroll: f32, total: f32) {
+    if total <= area.h {
+        return;
+    }
+    let h = (area.h * area.h / total).max(30.0);
+    let y = area.y + (scroll / (total - area.h)).clamp(0.0, 1.0) * (area.h - h);
+    g.rounded(Rect::new(area.right() - 3.0, y, 4.0, h), 2.0, theme::INK.alpha(0.55));
+}
 
 /// GPU textures for cover thumbnails, loaded lazily for what's on screen.
 pub struct ThumbCache {

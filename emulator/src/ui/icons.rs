@@ -12,7 +12,6 @@ pub enum Icon {
     Stick,
     CursorFill,
     CursorOutline,
-    Folder,
     Sliders,
     Refresh,
     Exit,
@@ -22,6 +21,11 @@ pub enum Icon {
     ChevronLeft,
     ChevronRight,
     Spinner,
+    Search,
+    Download,
+    Clock,
+    Warning,
+    Globe,
 }
 
 type P = (f32, f32);
@@ -107,11 +111,6 @@ fn sdf(icon: Icon, p: P, px: f32) -> f32 {
             let d = polygon(p, &arrow);
             if icon == Icon::CursorFill { d } else { d - 0.07 }
         }
-        Icon::Folder => {
-            let body = rbox(p, (0.5, 0.56), (0.4, 0.28), 0.06);
-            let tab = rbox(p, (0.3, 0.26), (0.2, 0.08), 0.05);
-            body.min(tab)
-        }
         Icon::Sliders => {
             let mut d = f32::MAX;
             for (y, knob) in [(0.26, 0.68), (0.5, 0.34), (0.74, 0.58)] {
@@ -165,6 +164,33 @@ fn sdf(icon: Icon, p: P, px: f32) -> f32 {
         Icon::Check => polyline(p, &[(0.22, 0.52), (0.42, 0.72), (0.8, 0.3)]) - stroke * 1.2,
         Icon::ChevronLeft => polyline(p, &[(0.62, 0.22), (0.36, 0.5), (0.62, 0.78)]) - stroke * 1.1,
         Icon::ChevronRight => polyline(p, &[(0.38, 0.22), (0.64, 0.5), (0.38, 0.78)]) - stroke * 1.1,
+        Icon::Search => {
+            let lens = circle(p, (0.43, 0.43), 0.22).abs() - stroke * 1.1;
+            lens.min(seg(p, (0.6, 0.6), (0.8, 0.8)) - stroke * 1.5)
+        }
+        Icon::Download => {
+            let shaft = seg(p, (0.5, 0.16), (0.5, 0.58)) - stroke * 1.1;
+            let head = polyline(p, &[(0.32, 0.42), (0.5, 0.6), (0.68, 0.42)]) - stroke * 1.1;
+            let tray = polyline(p, &[(0.18, 0.62), (0.18, 0.82), (0.82, 0.82), (0.82, 0.62)]) - stroke;
+            shaft.min(head).min(tray)
+        }
+        Icon::Clock => {
+            let face = circle(p, (0.5, 0.5), 0.34).abs() - stroke;
+            face.min(polyline(p, &[(0.5, 0.3), (0.5, 0.52), (0.64, 0.6)]) - stroke)
+        }
+        Icon::Warning => {
+            let t = polygon(p, &[(0.5, 0.16), (0.86, 0.8), (0.14, 0.8)]).abs() - stroke;
+            let bar = seg(p, (0.5, 0.4), (0.5, 0.58)) - stroke * 1.1;
+            t.min(bar).min(circle(p, (0.5, 0.69), stroke * 1.4))
+        }
+        Icon::Globe => {
+            let face = circle(p, (0.5, 0.5), 0.34);
+            // Meridian ellipse and the equator, clipped to the face.
+            let (ex, ey) = ((p.0 - 0.5) / 0.15, (p.1 - 0.5) / 0.34);
+            let meridian = ((ex * ex + ey * ey).sqrt() - 1.0).abs() * 0.15 - stroke * 0.8;
+            let equator = seg(p, (0.16, 0.5), (0.84, 0.5)) - stroke * 0.8;
+            (face.abs() - stroke).min(meridian.min(equator).max(face))
+        }
         Icon::Spinner => {
             // A 270 degree arc; rotation is done by drawing different frames.
             let (dx, dy) = (p.0 - 0.5, p.1 - 0.5);

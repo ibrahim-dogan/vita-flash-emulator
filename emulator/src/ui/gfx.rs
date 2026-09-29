@@ -1,6 +1,6 @@
 //! A small batched 2D renderer for RuffleVita's UI.
 //!
-//! Everything (text, rounded rectangles, soft shadows, icons) is drawn from
+//! Everything (text, rounded rectangles, patterns, icons) is drawn from
 //! one RGBA atlas plus optional image textures, accumulated into a single
 //! vertex buffer and flushed with a handful of draw calls per frame. Colours
 //! are premultiplied. Anti-aliasing comes from rasterising shapes at their
@@ -34,16 +34,6 @@ impl Color {
 
     pub const fn alpha(self, a: f32) -> Self {
         Color { a: self.a * a, ..self }
-    }
-
-    pub fn mix(self, other: Color, t: f32) -> Color {
-        let t = t.clamp(0.0, 1.0);
-        Color {
-            r: self.r + (other.r - self.r) * t,
-            g: self.g + (other.g - self.g) * t,
-            b: self.b + (other.b - self.b) * t,
-            a: self.a + (other.a - self.a) * t,
-        }
     }
 
     fn premul(self) -> [u8; 4] {
@@ -80,6 +70,9 @@ impl Rect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
+    pub fn offset(&self, dx: f32, dy: f32) -> Rect {
+        Rect::new(self.x + dx, self.y + dy, self.w, self.h)
+    }
     pub fn inset(&self, d: f32) -> Rect {
         Rect::new(self.x + d, self.y + d, (self.w - 2.0 * d).max(0.0), (self.h - 2.0 * d).max(0.0))
     }
@@ -94,8 +87,25 @@ impl Rect {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FontId {
+    /// Nunito Bold: running text.
     Regular = 0,
+    /// Nunito Black: labels and emphasis.
     Bold = 1,
+    /// Lilita One: titles, tabs and the wordmark.
+    Display = 2,
+}
+
+/// Inter SemiBold, for characters the other fonts lack (arrows, and
+/// Turkish letters in Lilita One).
+const FALLBACK_FONT: usize = 3;
+
+/// Repeating textures for [`Gfx::pattern`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pattern {
+    /// A dot every 16 px.
+    Dots,
+    /// 45 degree stripes, 8 px on and 8 px off.
+    Stripes,
 }
 
 #[repr(C)]
@@ -148,8 +158,10 @@ impl Drop for Texture {
 const ATLAS_W: usize = 1024;
 const ATLAS_H: usize = 1024;
 /// Corner radii with pre-rasterised quarter circles; others snap to the nearest.
-const RADII: [u32; 9] = [4, 6, 8, 10, 12, 16, 20, 24, 32];
-const BLURS: [u32; 3] = [8, 16, 28];
+const RADII: [u32; 16] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 20, 24, 32];
+/// Pattern tiles are this many pixels square (a power of two, so they can
+/// repeat on GLES2).
+const PATTERN_TILE: usize = 32;
 
 struct Shelf {
     y: usize,
@@ -219,14 +231,13 @@ pub struct Gfx {
     /// End of the fixed (shapes) region; glyphs/icons above it can be evicted.
     static_shelves: usize,
     static_next_y: usize,
-    fonts: [fontdue::Font; 2],
+    fonts: [fontdue::Font; 4],
     glyphs: HashMap<(u8, u16, u16), Option<Glyph>>,
+    patterns: [glow::Texture; 2],
     icons: HashMap<(Icon, u16), UvRect>,
     white: UvRect,
     corners: Vec<(u32, UvRect)>,
     inv_corners: Vec<(u32, UvRect)>,
-    shadows: Vec<(u32, UvRect)>,
-    glow_uv: UvRect,
     verts: Vec<Vertex>,
     cmds: Vec<DrawCmd>,
     clip_stack: Vec<Rect>,
@@ -259,8 +270,35 @@ void main() {
 }
 ";
 
-static FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
-static FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+static FONT_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Nunito-Bold.ttf");
+static FONT_BOLD: &[u8] = include_bytes!("../../assets/fonts/Nunito-Black.ttf");
+static FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fonts/LilitaOne-Regular.ttf");
+static FONT_FALLBACK: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+
+/// Coverage of one pattern tile, `PATTERN_TILE` squared.
+fn pattern_tile(pattern: Pattern) -> Vec<u8> {
+    let n = PATTERN_TILE;
+    let mut data = vec![0u8; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let cov = match pattern {
+                Pattern::Dots => {
+                    // Distance to the nearest dot centre on a 16 px grid.
+                    let (dx, dy) = ((fx % 16.0) - 8.0, (fy % 16.0) - 8.0);
+                    (1.9 - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0)
+                }
+                Pattern::Stripes => {
+                    // Position across the stripes, period 16 px along x + y.
+                    let t = (fx + fy) % 16.0;
+                    (t.min(16.0 - t) - 4.0 + 0.5).clamp(0.0, 1.0)
+                }
+            };
+            data[y * n + x] = (cov * 255.0 + 0.5) as u8;
+        }
+    }
+    data
+}
 
 impl Gfx {
     pub fn new(gl: Arc<glow::Context>, width: u32, height: u32) -> anyhow::Result<Self> {
@@ -268,7 +306,7 @@ impl Gfx {
             fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
                 .map_err(|e| anyhow::anyhow!("font: {e}"))
         };
-        let fonts = [font(FONT_REGULAR)?, font(FONT_BOLD)?];
+        let fonts = [font(FONT_REGULAR)?, font(FONT_BOLD)?, font(FONT_DISPLAY)?, font(FONT_FALLBACK)?];
 
         unsafe {
             let vs = ruffle_render_glow::compile_shader(&gl, glow::VERTEX_SHADER, VERT_SRC)?;
@@ -363,40 +401,35 @@ impl Gfx {
                 inv_corners.push((r, atlas.uv(x, y, n, n)));
             }
 
-            let mut shadows = Vec::new();
-            for b in BLURS {
-                // Separable falloff: 2b ramp, 1px plateau, 2b ramp.
-                let n = (4 * b + 1) as usize;
-                let ramp = |i: usize| {
-                    let t = if i <= 2 * b as usize { i } else { n - 1 - i } as f32 / (2 * b) as f32;
-                    let t = t.clamp(0.0, 1.0);
-                    t * t * (3.0 - 2.0 * t)
-                };
-                let mut data = vec![0u8; n * n];
-                for y in 0..n {
-                    for x in 0..n {
-                        data[y * n + x] = (ramp(x) * ramp(y) * 255.0 + 0.5) as u8;
-                    }
+            let mut patterns = Vec::new();
+            for pattern in [Pattern::Dots, Pattern::Stripes] {
+                let alpha = pattern_tile(pattern);
+                let rgba: Vec<u8> = alpha.iter().flat_map(|a| [*a; 4]).collect();
+                let t = gl.create_texture().map_err(anyhow::Error::msg)?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(t));
+                for (p, v) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::REPEAT),
+                    (glow::TEXTURE_WRAP_T, glow::REPEAT),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
                 }
-                let (x, y) = atlas.alloc(n, n).unwrap();
-                atlas.put_alpha(x, y, n, n, &data);
-                shadows.push((b, atlas.uv(x, y, n, n)));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA as i32,
+                    PATTERN_TILE as i32,
+                    PATTERN_TILE as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&rgba)),
+                );
+                patterns.push(t);
             }
-
-            // Radial falloff for large soft glows (scaled up with linear filtering).
-            let n = 64usize;
-            let mut data = vec![0u8; n * n];
-            for y in 0..n {
-                for x in 0..n {
-                    let dx = (x as f32 + 0.5) / n as f32 * 2.0 - 1.0;
-                    let dy = (y as f32 + 0.5) / n as f32 * 2.0 - 1.0;
-                    let t = (1.0 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-                    data[y * n + x] = (t * t * (3.0 - 2.0 * t) * 255.0 + 0.5) as u8;
-                }
-            }
-            let (gx, gy) = atlas.alloc(n, n).unwrap();
-            atlas.put_alpha(gx, gy, n, n, &data);
-            let glow_uv = atlas.uv(gx, gy, n, n);
+            let patterns = [patterns[0], patterns[1]];
 
             let static_shelves = atlas.shelves.len();
             let static_next_y = atlas.next_y;
@@ -411,12 +444,11 @@ impl Gfx {
                 static_next_y,
                 fonts,
                 glyphs: HashMap::new(),
+                patterns,
                 icons: HashMap::new(),
                 white,
                 corners,
                 inv_corners,
-                shadows,
-                glow_uv,
                 verts: Vec::with_capacity(16 * 1024),
                 cmds: Vec::new(),
                 clip_stack: Vec::new(),
@@ -580,20 +612,6 @@ impl Gfx {
         self.quad_uv(r, uv, color);
     }
 
-    /// Vertical gradient.
-    pub fn rect_v(&mut self, r: Rect, top: Color, bottom: Color) {
-        let p = [[r.x, r.y], [r.right(), r.y], [r.right(), r.bottom()], [r.x, r.bottom()]];
-        let (tex, uv) = (self.atlas.tex, self.white);
-        self.push_quad(tex, p, uv, [top, top, bottom, bottom]);
-    }
-
-    /// Horizontal gradient.
-    pub fn rect_h(&mut self, r: Rect, left: Color, right: Color) {
-        let p = [[r.x, r.y], [r.right(), r.y], [r.right(), r.bottom()], [r.x, r.bottom()]];
-        let (tex, uv) = (self.atlas.tex, self.white);
-        self.push_quad(tex, p, uv, [left, right, right, left]);
-    }
-
     fn pick<'a>(list: &'a [(u32, UvRect)], want: f32) -> &'a (u32, UvRect) {
         list.iter()
             .min_by(|a, b| {
@@ -646,35 +664,17 @@ impl Gfx {
         self.corners(r, radius, true, bg);
     }
 
-    /// Soft drop shadow around `r`.
-    pub fn shadow(&mut self, r: Rect, blur: f32, color: Color) {
-        let (b, uv) = *Self::pick(&self.shadows, blur);
-        let bf = b as f32;
-        let outer = Rect::new(r.x - bf, r.y - bf, r.w + 2.0 * bf, r.h + 2.0 * bf);
-        let e = 2.0 * bf; // corner extent
-        let (um, vm) = ((uv.u0 + uv.u1) * 0.5, (uv.v0 + uv.v1) * 0.5);
-        let xs = [outer.x, outer.x + e, outer.right() - e, outer.right()];
-        let ys = [outer.y, outer.y + e, outer.bottom() - e, outer.bottom()];
-        let us = [uv.u0, um, um, uv.u1];
-        let vs = [uv.v0, vm, vm, uv.v1];
-        if xs[2] < xs[1] || ys[2] < ys[1] {
+    /// Tiles `pattern` over `r` in `color`, aligned to the screen so
+    /// neighbouring areas line up.
+    pub fn pattern(&mut self, pattern: Pattern, r: Rect, color: Color) {
+        if r.w <= 0.0 || r.h <= 0.0 || color.a <= 0.0 {
             return;
         }
-        for j in 0..3 {
-            for i in 0..3 {
-                let rr = Rect::new(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
-                if rr.w > 0.0 && rr.h > 0.0 {
-                    let q = UvRect { u0: us[i], v0: vs[j], u1: us[i + 1], v1: vs[j + 1] };
-                    self.quad_uv(rr, q, color);
-                }
-            }
-        }
-    }
-
-    /// Large soft radial glow centred on (`cx`, `cy`).
-    pub fn glow(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, color: Color) {
-        let uv = self.glow_uv;
-        self.quad_uv(Rect::new(cx - rx, cy - ry, rx * 2.0, ry * 2.0), uv, color);
+        let t = PATTERN_TILE as f32;
+        let uv = UvRect { u0: r.x / t, v0: r.y / t, u1: r.right() / t, v1: r.bottom() / t };
+        let p = [[r.x, r.y], [r.right(), r.y], [r.right(), r.bottom()], [r.x, r.bottom()]];
+        let tex = self.patterns[pattern as usize];
+        self.push_quad(tex, p, uv, [color; 4]);
     }
 
     pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
@@ -725,12 +725,12 @@ impl Gfx {
 
     // ----------------------------------------------------------------- text
 
-    fn glyph(&mut self, font: FontId, index: u16, px: f32) -> Option<Glyph> {
+    fn glyph(&mut self, font: usize, index: u16, px: f32) -> Option<Glyph> {
         let key = (font as u8, index, (px * 4.0) as u16);
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
-        let f = &self.fonts[font as usize];
+        let f = &self.fonts[font];
         let (m, bitmap) = f.rasterize_indexed(index, px);
         let glyph = if m.width == 0 || m.height == 0 {
             Some(Glyph {
@@ -758,11 +758,26 @@ impl Gfx {
         glyph
     }
 
-    fn glyph_index(&self, font: FontId, c: char) -> u16 {
-        let f = &self.fonts[font as usize];
-        match f.lookup_glyph_index(c) {
-            0 => f.lookup_glyph_index('?'),
-            i => i,
+    /// The font and glyph to draw `c` with: `font` if it has the character,
+    /// else Nunito Black (for Lilita One), else Inter, else a '?'.
+    fn glyph_index(&self, font: FontId, c: char) -> (usize, u16) {
+        let chain: &[usize] = match font {
+            FontId::Display => &[FontId::Display as usize, FontId::Bold as usize, FALLBACK_FONT],
+            other => &[other as usize, FALLBACK_FONT],
+        };
+        for &f in chain {
+            match self.fonts[f].lookup_glyph_index(c) {
+                0 => continue,
+                i => return (f, i),
+            }
+        }
+        (chain[0], self.fonts[chain[0]].lookup_glyph_index('?'))
+    }
+
+    fn kern(&self, prev: Option<(usize, u16)>, cur: (usize, u16), px: f32) -> f32 {
+        match prev {
+            Some((pf, pi)) if pf == cur.0 => self.fonts[pf].horizontal_kern_indexed(pi, cur.1, px).unwrap_or(0.0),
+            _ => 0.0,
         }
     }
 
@@ -771,10 +786,8 @@ impl Gfx {
         let mut prev = None;
         for c in text.chars() {
             let idx = self.glyph_index(font, c);
-            if let Some(p) = prev {
-                w += self.fonts[font as usize].horizontal_kern_indexed(p, idx, px).unwrap_or(0.0);
-            }
-            if let Some(g) = self.glyph(font, idx, px) {
+            w += self.kern(prev, idx, px);
+            if let Some(g) = self.glyph(idx.0, idx.1, px) {
                 w += g.advance;
             }
             prev = Some(idx);
@@ -789,10 +802,8 @@ impl Gfx {
         let base = baseline.round();
         for c in text.chars() {
             let idx = self.glyph_index(font, c);
-            if let Some(p) = prev {
-                pen += self.fonts[font as usize].horizontal_kern_indexed(p, idx, px).unwrap_or(0.0);
-            }
-            let Some(g) = self.glyph(font, idx, px) else { continue };
+            pen += self.kern(prev, idx, px);
+            let Some(g) = self.glyph(idx.0, idx.1, px) else { continue };
             if g.w > 0.0 {
                 let r = Rect::new((pen + g.xmin).round(), base - g.ymin - g.h, g.w, g.h);
                 self.quad_uv(r, g.uv, color);

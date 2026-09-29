@@ -1883,7 +1883,7 @@ source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb37
 
 [[package]]
 name = "rufflevita"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1893,6 +1893,7 @@ dependencies = [
  "fontdue",
  "glow",
  "indexmap",
+ "jpeg-decoder",
  "png",
  "ron",
  "ruffle_core",

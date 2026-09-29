@@ -131,6 +131,8 @@ pub enum InputEvent {
     Touch(Touch),
     Text(String),
     Backspace,
+    /// Return on a keyboard: ends typing.
+    Enter,
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -165,6 +167,9 @@ pub struct Input {
     nav_dir: Option<(Btn, Instant)>,
     stick_dir: Option<Btn>,
     pub quit: bool,
+    /// While typing into a text box, the desktop keyboard types instead of
+    /// standing in for the Vita's buttons.
+    pub typing: bool,
     #[cfg(not(target_os = "vita"))]
     mouse_down: bool,
 }
@@ -179,6 +184,7 @@ impl Input {
             nav_dir: None,
             stick_dir: None,
             quit: false,
+            typing: false,
             #[cfg(not(target_os = "vita"))]
             mouse_down: false,
         }
@@ -230,6 +236,15 @@ impl Input {
             }
             Event::TextInput { ref text, .. } => self.events.push(InputEvent::Text(text.clone())),
             #[cfg(not(target_os = "vita"))]
+            Event::KeyDown { scancode: Some(sc), .. } if self.typing => {
+                use sdl2::keyboard::Scancode as S;
+                match sc {
+                    S::Return | S::KpEnter | S::Escape => self.events.push(InputEvent::Enter),
+                    S::Backspace => self.events.push(InputEvent::Backspace),
+                    _ => {}
+                }
+            }
+            #[cfg(not(target_os = "vita"))]
             Event::KeyDown { scancode: Some(sc), repeat: false, .. } => {
                 if let Some(b) = Btn::from_keyboard(sc) {
                     self.set_button(b, true);
@@ -243,10 +258,14 @@ impl Input {
                     self.set_button(b, false);
                 }
             }
+            // The Vita's on-screen keyboard sends these as keys, not text.
             #[cfg(target_os = "vita")]
-            Event::KeyDown { scancode: Some(sdl2::keyboard::Scancode::Backspace), .. } => {
-                self.events.push(InputEvent::Backspace);
-            }
+            Event::KeyDown { scancode: Some(sc), .. } => match sc {
+                sdl2::keyboard::Scancode::Backspace => self.events.push(InputEvent::Backspace),
+                sdl2::keyboard::Scancode::Space => self.events.push(InputEvent::Text(" ".into())),
+                sdl2::keyboard::Scancode::Return => self.events.push(InputEvent::Enter),
+                _ => {}
+            },
             // Desktop: the mouse stands in for the front touchscreen.
             #[cfg(not(target_os = "vita"))]
             Event::MouseButtonDown { mouse_btn: sdl2::mouse::MouseButton::Left, x, y, .. } => {
@@ -299,6 +318,11 @@ impl Input {
     #[cfg(not(target_os = "vita"))]
     pub fn inject(&mut self, b: Btn, down: bool) {
         self.set_button(b, down);
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn inject_event(&mut self, ev: InputEvent) {
+        self.events.push(ev);
     }
 
     #[cfg(not(target_os = "vita"))]

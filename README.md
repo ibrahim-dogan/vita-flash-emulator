@@ -4,23 +4,23 @@
 
 **Play Flash games on your PS Vita.**
 
-A native Flash player for the PS Vita built on [Ruffle](https://ruffle.rs) — one VPK with a game library, touch controls, per-game button mapping and a pause menu.
+A native Flash player for the PS Vita built on [Ruffle](https://ruffle.rs) — one VPK with a game library, an Explore tab to find and download games over Wi-Fi, touch controls, per-game button mapping and a pause menu.
 
 Made by **İbrahim Doğan**
 
 [**⬇ Download the latest VPK**](https://github.com/ibrahim-dogan/vita-flash-emulator/releases/latest)
 
-<img src="docs/media/trailer.gif" alt="RuffleVita running on a PS Vita" width="900">
-
-<sub>[Watch the trailer in full quality (MP4)](docs/media/trailer.mp4)</sub>
+<img src="docs/media/hero.png" alt="RuffleVita's Explore tab on a PS Vita" width="900">
 
 </div>
 
 ## Screenshots
 
-| Library | In game |
+| Library | Explore |
 | :---: | :---: |
-| <img src="docs/media/library.png" width="440"> | <img src="docs/media/game.png" width="440"> |
+| <img src="docs/media/library.png" width="440"> | <img src="docs/media/explore.png" width="440"> |
+| **Downloading** | **In game** |
+| <img src="docs/media/explore_download.png" width="440"> | <img src="docs/media/game.png" width="440"> |
 | **Pause menu** | **Button mapping** |
 | <img src="docs/media/pause.png" width="440"> | <img src="docs/media/keypicker.png" width="440"> |
 | **Controls** | **Display options** |
@@ -52,10 +52,20 @@ ux0:data/FlashGames/
 
 - The file name becomes the game's title in the library (underscores turn into spaces).
 - Some games are split into several files, such as a loader plus the main SWF, level data or XML. Keep all of them in the same folder, as they came.
-- Portal "loader" SWFs often try to download the real game from a website that no longer exists. RuffleVita can't go online, so it looks for a file with the same name in the game's folder instead. If that file is missing, RuffleVita tells you which one.
+- Portal "loader" SWFs often try to download the real game from a website that no longer exists. Games can't go online, so RuffleVita looks for a file with the same name in the game's folder instead. If that file is missing, RuffleVita tells you which one.
 - Added games while RuffleVita is open? Press **SELECT** in the library to refresh.
 
-RuffleVita keeps its own data in **`ux0:data/rufflevita/`**: settings, per-game profiles, covers, game saves and `log.txt`.
+RuffleVita keeps its own data in **`ux0:data/rufflevita/`**: settings, per-game profiles, covers, game saves, the Explore catalog and `log.txt`.
+
+### Finding games in Explore
+
+Press **R** in the library to open **Explore**: about 6,000 Flash games from the [Silvergames](https://www.silvergames.com) archive at `files.silvergames.com/flash/`. It needs Wi-Fi.
+
+- The catalog downloads the first time you open Explore and is saved on the memory card; it refreshes once a week, or when you press **SELECT**.
+- Press **△** to search with the Vita's keyboard and **○** to clear the search. **□** sorts by name, newest or smallest.
+- Rest on a game for a moment and RuffleVita reads its first 16 KB to show its ActionScript version, stage size and frame rate before you download it. Only about one in six games still has cover art on Silvergames; the rest get a cover made from their name.
+- **✕** downloads the game into `ux0:data/FlashGames/`, where it shows up in the library. **✕** again cancels the download, and on a game you already have it starts playing.
+- Games over 20 MB are marked as large: some won't fit in the Vita's memory.
 
 ### Coming from FlashVita 1.0.0
 
@@ -63,7 +73,9 @@ Version 1.0.0 was released as FlashVita. RuffleVita installs as a new app next t
 
 ## Controls
 
-**Library:** D-pad/left stick to browse, ✕ to play, △ for game settings, □ to sort (recent / A–Z), L/R to page, SELECT to refresh. You can also tap a game to select it and tap again to play.
+**Library:** D-pad up/down (or the left stick) to browse, left/right to page, ✕ to play, △ for game settings, □ to sort (recent / A–Z), SELECT to refresh, **L/R to switch between Library and Explore**. You can also tap a game to select it and tap again to play.
+
+**Explore:** the same, with △ to search, ○ to clear the search, □ to sort, ✕ to download (or cancel, or play) and SELECT to refresh the catalog.
 
 **In game (defaults, change them per game):**
 
@@ -82,6 +94,7 @@ Open **Game settings** from the library (△) or the pause menu. There you can b
 
 ## Features
 
+- **Explore.** Browse, search and download about 6,000 games from the Silvergames Flash archive, with each game's details read before you download it.
 - **Library with covers.** Covers are pulled from artwork inside each SWF, replaced by a screenshot once you've played for a bit, or set manually from the pause menu. The library also shows SWF details (ActionScript version, stage size, frame rate, file size) and play history.
 - **Fast startup.** Games are read and unpacked on a background thread while an animated loading screen shows progress. SWF analysis is cached between runs.
 - **Pause menu.** Resume, change settings with a live preview, set a cover, restart, or quit to the library. Game saves are written to the memory card when you pause.
@@ -132,7 +145,7 @@ On the desktop build, the keyboard stands in for the Vita:
 | Tab | SELECT |
 | Mouse | Front touch screen |
 
-`RUFFLEVITA_SCRIPT` automates input for screenshots and recordings (`wait`, `sleep`, `press`, `hold`, `tap`, `shot`, `rec`/`stoprec`, `quit`).
+`RUFFLEVITA_SCRIPT` automates input for screenshots and recordings (`wait`, `sleep`, `press`, `hold`, `tap`, `type` (with `_` for spaces), `enter`, `shot`, `rec`/`stoprec`, `quit`).
 
 The LiveArea artwork is rendered by the app itself (`RUFFLEVITA_RENDER_ASSETS=/tmp/art cargo run`, then `python3 tools/make_livearea.py /tmp/art`). `tools/vita_frame.py` draws the Vita frame used in this README.
 
@@ -142,9 +155,11 @@ The LiveArea artwork is rendered by the app itself (`RUFFLEVITA_RENDER_ASSETS=/t
 | --- | --- |
 | `emulator/src/main.rs` | App state machine and frame loop |
 | `emulator/src/session.rs` | A running game: Ruffle player and input mapping |
-| `emulator/src/screens/` | Library, loading, pause menu, settings, key picker |
+| `emulator/src/screens/` | Library, Explore, loading, pause menu, settings, key picker |
 | `emulator/src/ui/` | Batched 2D renderer (font atlas, SDF icons) and theme |
 | `emulator/src/worker.rs` | Background thread: movie loading, SWF analysis, covers |
+| `emulator/src/catalog.rs` | The Explore catalog: listing parser, search, caches |
+| `emulator/src/fetcher.rs`, `net.rs` | Network threads and a small HTTP client for Explore |
 | `emulator/src/swfinfo.rs` | Fast SWF header parsing and cover extraction |
 | `emulator/ruffle_render_glow/` | GLES2 Ruffle renderer tuned for vitaGL |
 | `emulator/patches/ruffle/` | Ruffle's core with performance and memory fixes for the Vita |
@@ -158,6 +173,7 @@ The LiveArea artwork is rendered by the app itself (`RUFFLEVITA_RENDER_ASSETS=/t
 - [Rinnegatamante](https://github.com/Rinnegatamante): vitaGL and vitaShaRK
 - [Northfear/SDL](https://github.com/Northfear/SDL): SDL2 with the vitaGL backend
 - [vita-rust](https://github.com/vita-rust): Rust toolchain for the Vita
-- [Inter](https://rsms.me/inter/): UI font (SIL Open Font License)
+- [Lilita One](https://fonts.google.com/specimen/Lilita+One) by Juan Montoreano and [Nunito](https://github.com/googlefonts/nunito) by Vernon Adams, Cyreal and Jacques Le Bailly: UI fonts, with [Inter](https://rsms.me/inter/) for symbols (all SIL Open Font License)
+- [Silvergames](https://www.silvergames.com): hosts the Flash archive Explore browses
 
-Flash games shown in the media belong to their respective authors. PlayStation and PS Vita are trademarks of Sony Interactive Entertainment. RuffleVita is an independent project and is not affiliated with Sony or with the Ruffle project.
+Flash games shown in the media and offered in Explore belong to their respective authors; Explore downloads them from Silvergames' public archive, one at a time, the way a browser would. PlayStation and PS Vita are trademarks of Sony Interactive Entertainment. RuffleVita is an independent project and is not affiliated with Sony, the Ruffle project or Silvergames.
