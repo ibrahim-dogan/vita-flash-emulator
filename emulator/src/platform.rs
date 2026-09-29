@@ -2,6 +2,8 @@
 //! storage locations, clocks, battery, time.
 
 use std::path::PathBuf;
+#[cfg(target_os = "vita")]
+use std::path::Path;
 
 pub const SCREEN_W: u32 = 960;
 pub const SCREEN_H: u32 = 544;
@@ -9,7 +11,9 @@ pub const SCREEN_H: u32 = 544;
 #[cfg(target_os = "vita")]
 mod paths {
     pub const GAMES_DIR: &str = "ux0:data/FlashGames";
-    pub const DATA_DIR: &str = "ux0:data/flashvita";
+    pub const DATA_DIR: &str = "ux0:data/rufflevita";
+    /// Where versions before 1.0.1, released as "FlashVita", kept their data.
+    pub const OLD_DATA_DIR: &str = "ux0:data/flashvita";
 }
 
 /// Where the user drops their `.swf` files.
@@ -20,7 +24,7 @@ pub fn games_dir() -> PathBuf {
     }
     #[cfg(not(target_os = "vita"))]
     {
-        std::env::var_os("FLASHVITA_GAMES")
+        std::env::var_os("RUFFLEVITA_GAMES")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("games"))
     }
@@ -43,9 +47,9 @@ pub fn data_dir() -> PathBuf {
     }
     #[cfg(not(target_os = "vita"))]
     {
-        std::env::var_os("FLASHVITA_DATA")
+        std::env::var_os("RUFFLEVITA_DATA")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("flashvita-data"))
+            .unwrap_or_else(|| PathBuf::from("rufflevita-data"))
     }
 }
 
@@ -59,6 +63,45 @@ pub fn profiles_dir() -> PathBuf {
 
 pub fn saves_dir() -> PathBuf {
     data_dir().join("saves")
+}
+
+/// On the first start after the rename from FlashVita, copies the settings,
+/// profiles, game saves and covers over from the old data folder, which is
+/// left untouched. Returns what happened, for the log.
+pub fn migrate_old_data() -> Option<String> {
+    #[cfg(target_os = "vita")]
+    {
+        let (old, new) = (PathBuf::from(paths::OLD_DATA_DIR), data_dir());
+        // `settings.ron` tells our old folder apart from another app's.
+        if new.exists() || !old.join("settings.ron").exists() {
+            return None;
+        }
+        Some(match copy_dir(&old, &new) {
+            Ok(files) => format!("Copied {files} files from {} to {}", old.display(), new.display()),
+            Err(e) => format!("Couldn't copy {} to {}: {e}", old.display(), new.display()),
+        })
+    }
+    #[cfg(not(target_os = "vita"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "vita")]
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(to)?;
+    let mut files = 0;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            files += copy_dir(&entry.path(), &target)?;
+        } else if entry.file_name() != "log.txt" {
+            std::fs::copy(entry.path(), &target)?;
+            files += 1;
+        }
+    }
+    Ok(files)
 }
 
 pub fn ensure_dirs() {
@@ -126,5 +169,43 @@ pub fn local_time() -> (u32, u32) {
         use chrono::Timelike;
         let now = chrono::Local::now();
         (now.hour(), now.minute())
+    }
+}
+
+/// Free GPU memory and used heap in MiB, for the performance overlay:
+/// "VRAM x · RAM x · PHY x free · heap x/240".
+pub fn memory_summary() -> Option<String> {
+    #[cfg(target_os = "vita")]
+    unsafe {
+        #[repr(C)]
+        struct Mallinfo {
+            arena: usize,
+            ordblks: usize,
+            smblks: usize,
+            hblks: usize,
+            hblkhd: usize,
+            usmblks: usize,
+            fsmblks: usize,
+            uordblks: usize,
+            fordblks: usize,
+            keepcost: usize,
+        }
+        unsafe extern "C" {
+            fn vglMemFree(kind: i32) -> usize;
+            fn mallinfo() -> Mallinfo;
+        }
+        const MIB: usize = 1024 * 1024;
+        let heap = mallinfo().uordblks / MIB;
+        let total = crate::NEWLIB_HEAP_SIZE_USER as usize / MIB;
+        Some(format!(
+            "VRAM {} \u{b7} RAM {} \u{b7} PHY {} free \u{b7} heap {heap}/{total} MB",
+            vglMemFree(0) / MIB,
+            vglMemFree(1) / MIB,
+            vglMemFree(2) / MIB,
+        ))
+    }
+    #[cfg(not(target_os = "vita"))]
+    {
+        None
     }
 }

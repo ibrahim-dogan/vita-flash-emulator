@@ -1,9 +1,11 @@
-//! FlashVita: a Flash player for PS Vita built on Ruffle.
+//! RuffleVita: a Flash player for PS Vita built on Ruffle.
 //!
 //! The app is a small state machine: Library -> Loading -> Playing, with
 //! modal overlays (pause menu, settings, key picker) on top. Slow work runs
 //! on a worker thread; the main thread only handles input, ticks Ruffle and
 //! draws.
+
+#![feature(alloc_error_hook)]
 
 #[cfg(not(target_os = "vita"))]
 mod assets;
@@ -66,6 +68,7 @@ unsafe extern "C" {
     ) -> bool;
     fn vglSetSemanticBindingMode(mode: u32);
     fn vglSetParamBufferSize(size: u32);
+    fn vglSetVertexAttribPoolSize(main_size: u32, aux_size: u32);
     fn vglUseCachedMem(r#use: bool);
     fn vglUseTripleBuffering(usage: bool);
 }
@@ -92,7 +95,7 @@ fn main() {
         // otherwise ask for 2 MiB each, which the Vita often can't provide.
         unsafe { std::env::set_var("RUST_MIN_STACK", "262144") };
         let handle = std::thread::Builder::new()
-            .name("flashvita-main".into())
+            .name("rufflevita-main".into())
             .stack_size(4 * 1024 * 1024)
             .spawn(body)
             .expect("couldn't spawn main thread");
@@ -148,7 +151,7 @@ fn init_logging() {
     #[cfg(target_os = "vita")]
     {
         // Warnings and our own messages only: every log line is a memory card write.
-        let filter = EnvFilter::builder().parse_lossy("error,flashvita=info");
+        let filter = EnvFilter::builder().parse_lossy("error,rufflevita=info");
         let path = platform::data_dir().join("log.txt");
         if let Ok(file) = std::fs::File::create(path) {
             tracing_subscriber::fmt()
@@ -160,8 +163,8 @@ fn init_logging() {
     }
     #[cfg(not(target_os = "vita"))]
     {
-        let spec = std::env::var("FLASHVITA_LOG")
-            .unwrap_or_else(|_| "warn,flashvita=info,avm_trace=info,avm_stub=off".into());
+        let spec = std::env::var("RUFFLEVITA_LOG")
+            .unwrap_or_else(|_| "warn,rufflevita=info,avm_trace=info,avm_stub=off".into());
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::builder().parse_lossy(spec))
             .init();
@@ -173,10 +176,20 @@ fn init_logging() {
 }
 
 fn run() -> anyhow::Result<()> {
+    let migrated = platform::migrate_old_data();
     platform::ensure_dirs();
     init_logging();
+    // Out of memory aborts the app; say so in the log first.
+    std::alloc::set_alloc_error_hook(|layout| {
+        let memory = platform::memory_summary().unwrap_or_default();
+        tracing::error!("Out of memory allocating {} bytes \u{b7} {memory}", layout.size());
+    });
+    let _ = ruffle_render_glow::MEMORY_PROBE.set(platform::memory_summary);
     platform::init_hardware();
-    tracing::info!("FlashVita {} starting", env!("CARGO_PKG_VERSION"));
+    tracing::info!("RuffleVita {} starting", env!("CARGO_PKG_VERSION"));
+    if let Some(migrated) = migrated {
+        tracing::info!("{migrated}");
+    }
 
     sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
     sdl2::hint::set("SDL_MOUSE_TOUCH_EVENTS", "0");
@@ -192,6 +205,11 @@ fn run() -> anyhow::Result<()> {
         vglUseCachedMem(false);
         vglUseTripleBuffering(false);
         vglSetParamBufferSize(4 * 1024 * 1024);
+        // Every VAO gets its own pool for constant attribute values, 64 KiB by
+        // default. The renderer makes one VAO per shape draw and never sets
+        // constant attributes (reset_vao only reserves 256 bytes), so at the
+        // default a game with thousands of shapes ran the Vita out of memory.
+        vglSetVertexAttribPoolSize(256 * 1024, 1024);
         vglInitWithCustomThreshold(0, SCREEN_W as i32, SCREEN_H as i32, 4 * 1024 * 1024, 0, 0, 0, 0);
     }
 
@@ -211,7 +229,7 @@ fn run() -> anyhow::Result<()> {
     gl_attr.set_double_buffer(true);
 
     let window = video
-        .window("FlashVita", SCREEN_W, SCREEN_H)
+        .window("RuffleVita", SCREEN_W, SCREEN_H)
         .opengl()
         .position_centered()
         .build()?;
@@ -226,7 +244,7 @@ fn run() -> anyhow::Result<()> {
 
     let mut gfx = Gfx::new(gl.clone(), SCREEN_W, SCREEN_H)?;
     #[cfg(not(target_os = "vita"))]
-    if let Some(dir) = std::env::var_os("FLASHVITA_RENDER_ASSETS") {
+    if let Some(dir) = std::env::var_os("RUFFLEVITA_RENDER_ASSETS") {
         assets::render_all(&mut gfx, &gl, std::path::Path::new(&dir));
         return Ok(());
     }
@@ -640,12 +658,14 @@ impl App {
                     self.worker.submit(Job::SaveScreenshot { key: session.key.clone(), img });
                 }
             }
+            let present = Instant::now();
             session.draw_overlay(&mut self.gfx);
             if let Some(t) = &self.toast {
                 t.draw(&mut self.gfx);
             }
             self.gfx.flush();
             self.window.gl_swap_window();
+            session.add_present_time(present.elapsed());
             if !toast {
                 self.toast = None;
             }

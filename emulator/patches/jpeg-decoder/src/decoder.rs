@@ -243,7 +243,7 @@ impl<R: Read> Decoder<R> {
     /// Heuristic to avoid starting thread, synchronization if we expect a small amount of
     /// parallelism to be utilized.
     fn select_worker(frame: &FrameInfo, worker_preference: PreferWorkerKind) -> PreferWorkerKind {
-        // FlashVita patch: on PS Vita spawning per-component worker threads
+        // RuffleVita patch: on PS Vita spawning per-component worker threads
         // (default 2 MiB stacks) fails once the heap has taken most memory,
         // which surfaced as "Invalid JPEG" for every image wider than ~128px.
         // Decode on the calling thread instead.

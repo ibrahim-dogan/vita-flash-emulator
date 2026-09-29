@@ -2,7 +2,7 @@
 //!
 //! Derived from Ruffle's WebGL backend. Differences worth knowing about:
 //! - GL state is fully re-established at the start of every frame, so other
-//!   GL users (FlashVita's UI overlay) can draw between frames safely.
+//!   GL users (RuffleVita's UI overlay) can draw between frames safely.
 //! - Redundant state changes (stencil, texture parameters, gradient uniforms)
 //!   are cached away; on vitaGL every GL call costs CPU time.
 //! - `update_texture` / `resolve_sync_handle` handle partial regions
@@ -34,6 +34,7 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use swf::{BlendMode, Color, Twips};
 use thiserror::Error;
 
@@ -96,6 +97,44 @@ enum MaskState {
     ClearMaskStencil,
 }
 
+static DRAW_CALLS: AtomicU32 = AtomicU32::new(0);
+
+/// `BitmapData.draw` renders through one fixed-size framebuffer, in tiles,
+/// and copies the result into the bitmap's texture. vitaGL creates a
+/// render target and a depth buffer (4 bytes per pixel) whenever a
+/// framebuffer's texture changes size, and frees them only a few frames
+/// later: attaching each bitmap in turn ran the Vita out of memory when a
+/// game drew into dozens of large bitmaps at once.
+const SCRATCH_SIZE: u32 = 1024;
+/// Bitmaps drawn into more often than this (like a per-frame canvas) get a
+/// framebuffer of their own, which skips the copies, if they fit in
+/// `SCRATCH_SIZE`.
+const DEDICATED_AFTER_DRAWS: u32 = 3;
+const MAX_DEDICATED_FRAMEBUFFERS: u32 = 8;
+static DEDICATED_FRAMEBUFFERS: AtomicU32 = AtomicU32::new(0);
+
+/// Describes free memory for the log; set by the app (vitaGL pools on Vita).
+pub static MEMORY_PROBE: std::sync::OnceLock<fn() -> Option<String>> = std::sync::OnceLock::new();
+
+/// Logs work on large textures together with free memory, so that running
+/// out of memory while a game builds huge bitmaps leaves a trail in the log.
+fn log_large_texture(what: &str, width: u32, height: u32) {
+    const LARGE: u64 = 4 * 1024 * 1024;
+    // Some games draw into a large bitmap every frame; don't log forever.
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    if u64::from(width) * u64::from(height) * 4 >= LARGE
+        && LOGGED.fetch_add(1, Ordering::Relaxed) < 300
+    {
+        let memory = MEMORY_PROBE.get().and_then(|probe| probe()).unwrap_or_default();
+        log::info!(target: "rufflevita", "{what} {width}x{height} texture \u{b7} {memory}");
+    }
+}
+
+/// Draw calls issued since the previous call, for the performance overlay.
+pub fn take_draw_calls() -> u32 {
+    DRAW_CALLS.swap(0, Ordering::Relaxed)
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct Vertex {
@@ -134,7 +173,10 @@ pub struct GlowRenderBackend {
 
     max_texture_size: u32,
 
+    /// The framebuffer `BitmapData.draw` renders through, with
+    /// `scratch_texture` (`SCRATCH_SIZE` square) attached once it's needed.
     offscreen_framebuffer: glow::Framebuffer,
+    scratch_texture: Option<glow::Texture>,
 
     color_program: ShaderProgram,
     bitmap_program: ShaderProgram,
@@ -171,6 +213,10 @@ struct RegistryData {
     /// Currently applied (filter, wrap) sampler parameters, to skip redundant
     /// `glTexParameter` calls.
     params: Cell<(u32, u32)>,
+    /// `BitmapData.draw` calls into this texture so far.
+    offscreen_draws: Cell<u32>,
+    /// A framebuffer of its own, once this texture is drawn into often.
+    framebuffer: Cell<Option<glow::Framebuffer>>,
 }
 
 impl RegistryData {
@@ -195,6 +241,10 @@ impl RegistryData {
 impl Drop for RegistryData {
     fn drop(&mut self) {
         unsafe {
+            if let Some(framebuffer) = self.framebuffer.take() {
+                self.gl.delete_framebuffer(framebuffer);
+                DEDICATED_FRAMEBUFFERS.fetch_sub(1, Ordering::Relaxed);
+            }
             self.gl.delete_texture(self.texture);
         }
     }
@@ -256,6 +306,7 @@ impl GlowRenderBackend {
                 msaa_sample_count,
                 max_texture_size,
                 offscreen_framebuffer,
+                scratch_texture: None,
                 color_program,
                 gradient_program,
                 bitmap_program,
@@ -666,6 +717,277 @@ impl GlowRenderBackend {
         self.apply_blend_mode(&self.current_blend_mode());
     }
 
+    /// Gives `entry` a framebuffer of its own (see `DEDICATED_AFTER_DRAWS`).
+    fn create_dedicated_framebuffer(&self, entry: &RegistryData) -> Option<glow::Framebuffer> {
+        unsafe {
+            let framebuffer = self.gl.create_framebuffer().ok()?;
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(entry.texture),
+                0,
+            );
+            let complete =
+                self.gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if !complete {
+                self.gl.delete_framebuffer(framebuffer);
+                return None;
+            }
+            DEDICATED_FRAMEBUFFERS.fetch_add(1, Ordering::Relaxed);
+            entry.framebuffer.set(Some(framebuffer));
+            Some(framebuffer)
+        }
+    }
+
+    /// Binds `offscreen_framebuffer` with the scratch texture attached,
+    /// creating the texture on first use.
+    fn bind_scratch_framebuffer(&mut self) -> bool {
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.offscreen_framebuffer));
+            if self.scratch_texture.is_some() {
+                return true;
+            }
+            let Ok(texture) = self.gl.create_texture() else {
+                return false;
+            };
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                SCRATCH_SIZE as i32,
+                SCRATCH_SIZE as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            for (param, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+            }
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            if self.gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                log::error!("Scratch framebuffer incomplete; skipping BitmapData.draw");
+                self.gl.delete_texture(texture);
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                return false;
+            }
+            self.scratch_texture = Some(texture);
+            true
+        }
+    }
+
+    /// Draws `commands` into `entry` tile by tile through the scratch
+    /// framebuffer: each tile starts as a copy of the bitmap, gets the
+    /// commands drawn over it, and is copied back.
+    fn render_offscreen_tiled(
+        &mut self,
+        entry: &RegistryData,
+        commands: CommandList,
+        bounds: PixelRegion,
+    ) -> bool {
+        if !self.bind_scratch_framebuffer() {
+            return false;
+        }
+        let mut region = bounds;
+        region.clamp(entry.width, entry.height);
+        for (x, y, w, h) in tiles(region) {
+            unsafe {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.offscreen_framebuffer));
+                self.gl.viewport(0, 0, w as i32, h as i32);
+            }
+            self.blit_texture_tile(entry, x, y, w, h);
+            self.render_tile(commands.clone(), x, y, w, h);
+            self.copy_scratch_to_texture(entry, x, y, w, h);
+        }
+        true
+    }
+
+    /// Copies the rendered tile from the scratch texture into `entry`.
+    fn copy_scratch_to_texture(&self, entry: &RegistryData, x: u32, y: u32, w: u32, h: u32) {
+        // vitaGL's glCopyTexSubImage2D goes through glTexSubImage2D, which
+        // reallocates the *whole* texture when the GPU used it recently (as
+        // the tile copy just did): a full copy of a huge bitmap per tile.
+        // Instead, wait for the GPU and copy the texels with a GPU transfer
+        // (or the CPU if that fails). Both textures are linear RGBA with rows
+        // padded to 8 pixels, and framebuffer row 0 is texture row 0.
+        #[cfg(target_os = "vita")]
+        unsafe {
+            use std::ffi::c_void;
+            unsafe extern "C" {
+                fn vglGetTexDataPointer(target: u32) -> *mut u8;
+                #[allow(clippy::too_many_arguments)]
+                fn sceGxmTransferCopy(
+                    width: u32,
+                    height: u32,
+                    color_key_value: u32,
+                    color_key_mask: u32,
+                    color_key_mode: u32,
+                    src_format: u32,
+                    src_type: u32,
+                    src: *const c_void,
+                    src_x: u32,
+                    src_y: u32,
+                    src_stride: i32,
+                    dst_format: u32,
+                    dst_type: u32,
+                    dst: *mut c_void,
+                    dst_x: u32,
+                    dst_y: u32,
+                    dst_stride: i32,
+                    sync_object: *mut c_void,
+                    sync_flags: u32,
+                    notification: *const c_void,
+                ) -> i32;
+                fn sceGxmTransferFinish() -> i32;
+            }
+            const TRANSFER_FORMAT_RAW32: u32 = 0x0011_0000;
+            const TRANSFER_LINEAR: u32 = 0;
+            const COLORKEY_NONE: u32 = 0;
+            let row_stride = |width: u32| (width.div_ceil(8) * 8 * 4) as usize;
+            self.gl.finish();
+            self.gl.bind_texture(glow::TEXTURE_2D, self.scratch_texture);
+            let src = vglGetTexDataPointer(glow::TEXTURE_2D);
+            entry.bind(&self.gl, glow::NEAREST, glow::CLAMP_TO_EDGE);
+            let dst = vglGetTexDataPointer(glow::TEXTURE_2D);
+            if !src.is_null() && !dst.is_null() {
+                let (src_stride, dst_stride) = (row_stride(SCRATCH_SIZE), row_stride(entry.width));
+                let result = sceGxmTransferCopy(
+                    w,
+                    h,
+                    0,
+                    0,
+                    COLORKEY_NONE,
+                    TRANSFER_FORMAT_RAW32,
+                    TRANSFER_LINEAR,
+                    src as *const c_void,
+                    0,
+                    0,
+                    src_stride as i32,
+                    TRANSFER_FORMAT_RAW32,
+                    TRANSFER_LINEAR,
+                    dst as *mut c_void,
+                    x,
+                    y,
+                    dst_stride as i32,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                );
+                if result >= 0 {
+                    sceGxmTransferFinish();
+                    return;
+                }
+                for row in 0..h as usize {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(row * src_stride),
+                        dst.add((y as usize + row) * dst_stride + x as usize * 4),
+                        w as usize * 4,
+                    );
+                }
+                return;
+            }
+        }
+        unsafe {
+            entry.bind(&self.gl, glow::NEAREST, glow::CLAMP_TO_EDGE);
+            self.gl.copy_tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                x as i32,
+                y as i32,
+                0,
+                0,
+                w as i32,
+                h as i32,
+            );
+        }
+    }
+
+    /// Runs `commands` into the bound framebuffer, which shows the bitmap
+    /// area `x..x + w`, `y..y + h` (in pixels, row 0 at the top).
+    fn render_tile(&mut self, commands: CommandList, x: u32, y: u32, w: u32, h: u32) {
+        let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+        unsafe { self.gl.viewport(0, 0, w as i32, h as i32) };
+        // Note: un-flipped Y, so texture row 0 is the top of the bitmap.
+        self.view_matrix = [
+            [2.0 / w, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / h, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [-1.0 - 2.0 * x as f32 / w, -1.0 - 2.0 * y as f32 / h, 0.0, 1.0],
+        ];
+        self.reset_gl_state();
+        self.set_stencil_state();
+        commands.execute(self);
+    }
+
+    /// Copies the `w` x `h` area of `entry` at `x`, `y` to the bound
+    /// framebuffer's viewport, replacing its contents.
+    fn blit_texture_tile(&mut self, entry: &RegistryData, x: u32, y: u32, w: u32, h: u32) {
+        let (tw, th) = (entry.width.max(1) as f32, entry.height.max(1) as f32);
+        unsafe {
+            let gl = &self.gl;
+            gl.disable(glow::STENCIL_TEST);
+            self.mask_state_dirty = true;
+            let program = &self.bitmap_program;
+            gl.use_program(Some(program.program));
+            self.active_program = std::ptr::null();
+            program.uniform_matrix4fv(
+                gl,
+                ShaderUniform::WorldMatrix,
+                &[
+                    [2.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [-1.0, -1.0, 0.0, 1.0],
+                ],
+            );
+            program.uniform_matrix4fv(
+                gl,
+                ShaderUniform::ViewMatrix,
+                &[
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+            );
+            program.uniform4fv(gl, ShaderUniform::MultColor, &[1.0, 1.0, 1.0, 1.0]);
+            program.uniform4fv(gl, ShaderUniform::AddColor, &[0.0, 0.0, 0.0, 0.0]);
+            program.uniform1f(gl, ShaderUniform::Repeat, 0.0);
+            program.uniform_matrix3fv(
+                gl,
+                ShaderUniform::TextureMatrix,
+                &[
+                    [w as f32 / tw, 0.0, 0.0],
+                    [0.0, h as f32 / th, 0.0],
+                    [x as f32 / tw, y as f32 / th, 1.0],
+                ],
+            );
+            entry.bind(gl, glow::NEAREST, glow::CLAMP_TO_EDGE);
+            gl.blend_func(glow::ONE, glow::ZERO);
+            let quad = &self.bitmap_quad_draws[0];
+            gl.bind_vertex_array(Some(quad.vao));
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
+            gl.draw_elements(glow::TRIANGLE_FAN, quad.num_indices, glow::UNSIGNED_INT, 0);
+            gl.bind_vertex_array(None);
+        }
+        self.apply_blend_mode(&self.current_blend_mode());
+    }
+
     fn begin_frame(&mut self, clear: Color) {
         self.reset_gl_state();
         unsafe {
@@ -752,6 +1074,7 @@ impl GlowRenderBackend {
             gl.blend_func(glow::ONE, glow::ZERO);
             let quad = &self.bitmap_quad_draws[0];
             gl.bind_vertex_array(Some(quad.vao));
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
             gl.draw_elements(glow::TRIANGLE_FAN, quad.num_indices, glow::UNSIGNED_INT, 0);
             gl.bind_vertex_array(None);
             self.apply_blend_mode(&self.current_blend_mode());
@@ -824,9 +1147,23 @@ impl GlowRenderBackend {
         let count = if COUNT < 0 { quad.num_indices } else { COUNT };
         unsafe {
             self.gl.bind_vertex_array(Some(quad.vao));
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
             self.gl.draw_elements(MODE, count, glow::UNSIGNED_INT, 0);
         }
     }
+}
+
+/// Splits `region` into tiles of at most `SCRATCH_SIZE` pixels square, as
+/// (x, y, width, height).
+fn tiles(region: PixelRegion) -> impl Iterator<Item = (u32, u32, u32, u32)> {
+    let step = SCRATCH_SIZE as usize;
+    (region.y_min..region.y_max).step_by(step).flat_map(move |y| {
+        (region.x_min..region.x_max).step_by(step).map(move |x| {
+            let w = (region.x_max - x).min(SCRATCH_SIZE);
+            let h = (region.y_max - y).min(SCRATCH_SIZE);
+            (x, y, w, h)
+        })
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -867,53 +1204,40 @@ impl RenderBackend for GlowRenderBackend {
         _quality: StageQuality,
         bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
-        let (texture, width, height) = {
-            let entry = as_registry_data(&handle);
-            (entry.texture, entry.width, entry.height)
-        };
+        let entry = as_registry_data(&handle);
+        let (width, height) = (entry.width, entry.height);
+        log_large_texture("Drawing into", width, height);
+        let draws = entry.offscreen_draws.get() + 1;
+        entry.offscreen_draws.set(draws);
 
         self.reset_gl_state();
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.offscreen_framebuffer));
-            self.gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(texture),
-                0,
-            );
-            if self.gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-                log::error!("Offscreen framebuffer incomplete; skipping BitmapData.draw");
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                return None;
+        let saved_view = self.view_matrix;
+        let framebuffer = match entry.framebuffer.get() {
+            Some(framebuffer) => Some(framebuffer),
+            None if draws > DEDICATED_AFTER_DRAWS
+                && width <= SCRATCH_SIZE
+                && height <= SCRATCH_SIZE
+                && DEDICATED_FRAMEBUFFERS.load(Ordering::Relaxed) < MAX_DEDICATED_FRAMEBUFFERS =>
+            {
+                self.create_dedicated_framebuffer(entry)
             }
-
-            self.gl.viewport(0, 0, width as i32, height as i32);
-            let saved_view = self.view_matrix;
-            // Note: un-flipped Y, so texture row 0 is the top of the bitmap.
-            self.view_matrix = [
-                [2.0 / width as f32, 0.0, 0.0, 0.0],
-                [0.0, 2.0 / height as f32, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [-1.0, -1.0, 0.0, 1.0],
-            ];
-
-            self.set_stencil_state();
-            commands.execute(self);
-
-            self.view_matrix = saved_view;
-            self.active_program = std::ptr::null();
-            self.gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                None,
-                0,
-            );
+            None => None,
+        };
+        let drawn = match framebuffer {
+            Some(framebuffer) => {
+                unsafe { self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer)) };
+                self.render_tile(commands, 0, 0, width, height);
+                true
+            }
+            None => self.render_offscreen_tiled(entry, commands, bounds),
+        };
+        self.view_matrix = saved_view;
+        self.active_program = std::ptr::null();
+        unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             self.gl.viewport(0, 0, self.renderbuffer_width, self.renderbuffer_height);
         }
-        Some(Box::new(QueueSyncHandle { texture: handle, bounds }))
+        drawn.then(|| Box::new(QueueSyncHandle { texture: handle, bounds }) as Box<dyn SyncHandle>)
     }
 
     fn viewport_dimensions(&self) -> ViewportDimensions {
@@ -979,6 +1303,7 @@ impl RenderBackend for GlowRenderBackend {
             bitmap.to_rgba()
         };
         self.clamp_bitmap(&mut bitmap, format);
+        log_large_texture("Uploading", bitmap.width(), bitmap.height());
         unsafe {
             let texture = self
                 .gl
@@ -1002,6 +1327,8 @@ impl RenderBackend for GlowRenderBackend {
                 height: bitmap.height(),
                 texture,
                 params: Cell::new((0, 0)),
+                offscreen_draws: Cell::new(0),
+                framebuffer: Cell::new(None),
             };
             entry.bind(&self.gl, glow::LINEAR, glow::CLAMP_TO_EDGE);
             Ok(BitmapHandle(Arc::new(entry)))
@@ -1110,37 +1437,51 @@ impl RenderBackend for GlowRenderBackend {
         let entry = as_registry_data(&handle.texture);
         let bounds = handle.bounds;
         let (width, height) = (bounds.width(), bounds.height());
+        log_large_texture("Reading back", width, height);
         let mut pixels = vec![0u8; (width * height * 4) as usize];
+        self.reset_gl_state();
         unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.offscreen_framebuffer));
-            self.gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(entry.texture),
-                0,
-            );
-            self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             // The buffer covers exactly `bounds`, rows `width * 4` bytes apart,
             // which is the layout `copy_pixels_to_bitmapdata` expects.
-            self.gl.read_pixels(
-                bounds.x_min as i32,
-                bounds.y_min as i32,
-                width as i32,
-                height as i32,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                PixelPackData::Slice(Some(&mut pixels)),
-            );
-            self.gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                None,
-                0,
-            );
+            if let Some(framebuffer) = entry.framebuffer.get() {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                self.gl.read_pixels(
+                    bounds.x_min as i32,
+                    bounds.y_min as i32,
+                    width as i32,
+                    height as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    PixelPackData::Slice(Some(&mut pixels)),
+                );
+            } else if self.bind_scratch_framebuffer() {
+                // Copy each tile into the scratch texture and read it from there.
+                let mut tile_pixels = Vec::new();
+                for (x, y, w, h) in tiles(bounds) {
+                    self.gl.viewport(0, 0, w as i32, h as i32);
+                    self.blit_texture_tile(entry, x, y, w, h);
+                    tile_pixels.resize((w * h * 4) as usize, 0);
+                    self.gl.read_pixels(
+                        0,
+                        0,
+                        w as i32,
+                        h as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        PixelPackData::Slice(Some(&mut tile_pixels)),
+                    );
+                    let row_bytes = (w * 4) as usize;
+                    for row in 0..h {
+                        let src = (row * w * 4) as usize;
+                        let dst = (((y - bounds.y_min + row) * width + (x - bounds.x_min)) * 4) as usize;
+                        pixels[dst..dst + row_bytes].copy_from_slice(&tile_pixels[src..src + row_bytes]);
+                    }
+                }
+            }
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.viewport(0, 0, self.renderbuffer_width, self.renderbuffer_height);
         }
+        self.active_program = std::ptr::null();
         with_rgba(&pixels, width * 4);
         Ok(())
     }
@@ -1165,7 +1506,12 @@ impl RenderBackend for GlowRenderBackend {
                 .create_texture()
                 .map_err(|e| BitmapError::Unimplemented(e.into()))?;
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            log_large_texture("Creating", width, height);
             // Allocate storage so the texture can back an offscreen framebuffer.
+            // It must start out transparent: vitaGL clears new textures, but
+            // desktop GL leaves them undefined.
+            let zeros = (!self.gl.version().is_embedded)
+                .then(|| vec![0u8; width as usize * height as usize * 4]);
             self.gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -1175,7 +1521,7 @@ impl RenderBackend for GlowRenderBackend {
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
+                glow::PixelUnpackData::Slice(zeros.as_deref()),
             );
             let entry = RegistryData {
                 gl: self.gl.clone(),
@@ -1183,6 +1529,8 @@ impl RenderBackend for GlowRenderBackend {
                 height,
                 texture,
                 params: Cell::new((0, 0)),
+                offscreen_draws: Cell::new(0),
+                framebuffer: Cell::new(None),
             };
             entry.bind(&self.gl, glow::LINEAR, glow::CLAMP_TO_EDGE);
             Ok(BitmapHandle(Arc::new(entry)))
@@ -1223,6 +1571,7 @@ impl CommandHandler for GlowRenderBackend {
 
         unsafe {
             self.gl.bind_vertex_array(Some(draw.vao));
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
             self.gl
                 .draw_elements(glow::TRIANGLE_FAN, draw.num_indices, glow::UNSIGNED_INT, 0);
         }
@@ -1290,6 +1639,7 @@ impl CommandHandler for GlowRenderBackend {
 
             unsafe {
                 self.gl.bind_vertex_array(Some(draw.vao));
+                DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
                 self.gl.draw_elements(glow::TRIANGLES, num_indices, glow::UNSIGNED_INT, 0);
             }
         }

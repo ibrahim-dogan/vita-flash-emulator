@@ -1,0 +1,798 @@
+use crate::avm2::error::{argument_error, error, make_error_2008};
+use crate::avm2::globals::methods::flash_geom_matrix_3d as matrix3d_methods;
+use crate::avm2::globals::slots::flash_geom_matrix_3d as matrix3d_slots;
+use crate::avm2::globals::slots::flash_geom_rectangle as rectangle_slots;
+use crate::avm2::parameters::ParametersExt;
+use crate::avm2::Activation;
+use crate::avm2::Error;
+use crate::avm2::TObject as _;
+use crate::avm2::Value;
+use crate::avm2_stub_method;
+use ruffle_macros::istr;
+use ruffle_render::backend::Context3DWrapMode;
+use ruffle_render::backend::{
+    BufferUsage, Context3DBlendFactor, Context3DCompareMode, Context3DTextureFormat,
+    Context3DTriangleFace, Context3DVertexBufferFormat, ProgramType,
+};
+use ruffle_render::backend::{Context3DProfile, Context3DTextureFilter};
+use swf::{Rectangle, Twips};
+
+pub fn create_index_buffer<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // FIXME - get bufferUsage and pass it through
+        let num_indices = args.get_u32(0);
+
+        if num_indices == 0 {
+            return Err(Error::avm_error(argument_error(
+                activation,
+                "Error #3671: Buffer has zero size.",
+                3671,
+            )?));
+        }
+
+        return Ok(context.create_index_buffer(num_indices, activation));
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn create_vertex_buffer<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // FIXME - get bufferUsage and pass it through
+        let num_vertices = args.get_u32(0);
+        let data_32_per_vertex = args.get_u32(1);
+
+        if data_32_per_vertex > 64 {
+            return Err(Error::avm_error(argument_error(
+                activation,
+                "Error #3670: Buffer too big.",
+                3670,
+            )?));
+        } else if data_32_per_vertex == 0 {
+            return Err(Error::avm_error(argument_error(
+                activation,
+                "Error #3671: Buffer has zero size.",
+                3671,
+            )?));
+        }
+
+        return Ok(context.create_vertex_buffer(
+            num_vertices,
+            data_32_per_vertex as u8,
+            BufferUsage::DynamicDraw,
+            activation,
+        ));
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn configure_back_buffer<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let width = args.get_u32(0);
+        let height = args.get_u32(1);
+        let anti_alias = args.get_u32(2);
+        let enable_depth_and_stencil = args.get_bool(3);
+
+        let old_swf = activation.context.root_swf.version() < 30;
+
+        if old_swf && width == 0 && height == 0 && anti_alias == 0 && !enable_depth_and_stencil {
+            return Ok(Value::Undefined);
+        }
+
+        if width < 32 || width > 16384 {
+            return Err(Error::avm_error(error(
+                activation,
+                if old_swf {
+                    "Error #3669: Bad input size."
+                } else {
+                    "Error #3780: Requested width of backbuffer is not in allowed range 32 to 16384."
+                },
+                if old_swf { 3669 } else { 3780 },
+            )?));
+        }
+
+        if height < 32 || height > 16384 {
+            return Err(Error::avm_error(error(
+                activation,
+                if old_swf {
+                    "Error #3669: Bad input size."
+                } else {
+                    "Error #3781: Requested height of backbuffer is not in allowed range 32 to 16384."
+                },
+                if old_swf { 3669 } else { 3781 },
+            )?));
+        }
+
+        let wants_best_resolution = args.get_bool(4);
+        let wants_best_resolution_on_browser_zoom = args.get_bool(5);
+
+        if wants_best_resolution {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "configureBackBuffer",
+                "wantsBestResolution"
+            );
+        }
+        if wants_best_resolution_on_browser_zoom {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "configureBackBuffer",
+                "wantsBestResolutionOnBrowserZoom"
+            );
+        }
+
+        context.configure_back_buffer(
+            width,
+            height,
+            anti_alias,
+            enable_depth_and_stencil,
+            wants_best_resolution,
+            wants_best_resolution_on_browser_zoom,
+        );
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_vertex_buffer_at<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let index = args.get_u32(0);
+        let buffer = args.try_get_object(1);
+
+        let buffer = if let Some(buffer) = buffer {
+            // Note - we only check the format string if the buffer is non-null
+            let format = args.get_string(activation, 3);
+
+            let format = if &*format == b"float4" {
+                Context3DVertexBufferFormat::Float4
+            } else if &*format == b"float3" {
+                Context3DVertexBufferFormat::Float3
+            } else if &*format == b"float2" {
+                Context3DVertexBufferFormat::Float2
+            } else if &*format == b"float1" {
+                Context3DVertexBufferFormat::Float1
+            } else if &*format == b"bytes4" {
+                Context3DVertexBufferFormat::Bytes4
+            } else {
+                return Err(Error::avm_error(argument_error(
+                    activation,
+                    "Error #2008: Parameter vertexStreamFormat must be one of the accepted values.",
+                    2008,
+                )?));
+            };
+
+            Some((buffer.as_vertex_buffer().unwrap(), format))
+        } else {
+            None
+        };
+
+        let buffer_offset = args.get_u32(2);
+
+        context.set_vertex_buffer_at(index, buffer, buffer_offset);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn create_program<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        return Ok(context.create_program(activation));
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_program<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let program = args.try_get_object(0).map(|p| p.as_program_3d().unwrap());
+        context.set_program(program);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn draw_triangles<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let index_buffer = args
+            .get_object(activation, 0, "indexBuffer")?
+            .as_index_buffer()
+            .unwrap();
+
+        let first_index = args.get_u32(1);
+        let num_triangles = args.get_u32(2) as i32;
+
+        context.draw_triangles(index_buffer, first_index, num_triangles);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn present<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        context.present();
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn get_profile<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let profile = match context.with_context_3d(|context| context.profile()) {
+            Context3DProfile::Baseline => istr!("baseline"),
+            Context3DProfile::BaselineConstrained => istr!("baselineConstrained"),
+            Context3DProfile::BaselineExtended => istr!("baselineExtended"),
+            Context3DProfile::Standard => istr!("standard"),
+            Context3DProfile::StandardConstrained => istr!("standardConstrained"),
+            Context3DProfile::StandardExtended => istr!("standardExtended"),
+        };
+
+        return Ok(profile.into());
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_culling<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let culling = args.get_string(activation, 0);
+
+        let culling = if &*culling == b"none" {
+            Context3DTriangleFace::None
+        } else if &*culling == b"back" {
+            Context3DTriangleFace::Back
+        } else if &*culling == b"front" {
+            Context3DTriangleFace::Front
+        } else if &*culling == b"frontAndBack" {
+            Context3DTriangleFace::FrontAndBack
+        } else {
+            tracing::error!("Unknown culling {:?}", culling);
+            Context3DTriangleFace::None
+        };
+
+        context.set_culling(culling);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_program_constants_from_matrix<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let program_type = args.get_string(activation, 0);
+
+        let is_vertex = if &*program_type == b"vertex" {
+            ProgramType::Vertex
+        } else if &*program_type == b"fragment" {
+            ProgramType::Fragment
+        } else {
+            panic!("Unknown program type {program_type:?}");
+        };
+
+        let first_register = args.get_u32(1);
+
+        let mut matrix = args.get_object(activation, 2, "matrix")?;
+
+        let user_transposed_matrix = args.get_bool(3);
+
+        // Hack - we store in column-major form, but we need it in row-major form
+        // So, do the *opposite* of what the user pasess in`
+        // or that's what I thought, but doing this seems to work???
+        //
+        // It seems like the documentation is wrong - we really copy to the registers
+        // in column-major order.
+        // See https://github.com/openfl/openfl/blob/971a4c9e43b5472fd84d73920a2b7c1b3d8d9257/src/openfl/display3D/Context3D.hx#L1532-L1550
+        if user_transposed_matrix {
+            matrix = Value::from(matrix)
+                .call_method(matrix3d_methods::CLONE, &[], activation)?
+                .as_object()
+                .expect("Matrix3D.clone returns Object");
+
+            Value::from(matrix).call_method(matrix3d_methods::TRANSPOSE, &[], activation)?;
+        }
+
+        let matrix_raw_data = matrix
+            .get_slot(matrix3d_slots::_RAW_DATA)
+            .as_object()
+            .expect("rawData cannot be null");
+
+        let matrix_raw_data = matrix_raw_data
+            .as_vector_storage()
+            .unwrap()
+            .iter()
+            .map(|val| val.as_f64() as f32)
+            .collect::<Vec<f32>>();
+
+        context.set_program_constants_from_matrix(is_vertex, first_register, matrix_raw_data);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_program_constants_from_vector<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        let program_type = args.get_string(activation, 0);
+
+        let program_type = if &*program_type == b"vertex" {
+            ProgramType::Vertex
+        } else if &*program_type == b"fragment" {
+            ProgramType::Fragment
+        } else {
+            panic!("Unknown program type {program_type:?}");
+        };
+
+        let first_register = args.get_u32(1);
+
+        let vector = args.get_object(activation, 2, "vector")?;
+        let vector = vector.as_vector_storage().unwrap();
+
+        let num_registers = args.get_i32(3);
+
+        let to_take = if num_registers != -1 {
+            // Each register requires 4 floating-point values
+            // FIXME - throw an error if 'vector' is too small
+            num_registers as usize * 4
+        } else {
+            vector.length()
+        };
+
+        let raw_data = vector
+            .iter()
+            .map(|val| val.as_f64() as f32)
+            .take(to_take)
+            .collect::<Vec<f32>>();
+
+        context.set_program_constants_from_matrix(program_type, first_register, raw_data);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn clear<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let red = args.get_f64(0);
+        let green = args.get_f64(1);
+        let blue = args.get_f64(2);
+        let alpha = args.get_f64(3);
+        let depth = args.get_f64(4);
+        let stencil = args.get_u32(5);
+        let mask = args.get_u32(6);
+
+        context.set_clear(red, green, blue, alpha, depth, stencil, mask);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn create_texture<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let width = args.get_i32(0) as u32;
+        let height = args.get_i32(1) as u32;
+        let format = args.get_string_non_null(activation, 2, "textureFormat")?;
+        let optimize_for_render_to_texture = args.get_bool(3);
+        let streaming_levels = args.get_i32(4) as u32;
+        let format = Context3DTextureFormat::from_wstr(&format)
+            .ok_or_else(|| make_error_2008(activation, "textureFormat"))?;
+
+        let class = activation.avm2().classes().texture;
+
+        return context.create_texture(
+            width,
+            height,
+            format,
+            optimize_for_render_to_texture,
+            streaming_levels,
+            class,
+            activation,
+        );
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn create_rectangle_texture<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let width = args.get_i32(0) as u32;
+        let height = args.get_i32(1) as u32;
+        let format = args.get_string_non_null(activation, 2, "textureFormat")?;
+        let optimize_for_render_to_texture = args.get_bool(3);
+        let format = Context3DTextureFormat::from_wstr(&format)
+            .ok_or_else(|| make_error_2008(activation, "textureFormat"))?;
+
+        let class = activation.avm2().classes().rectangletexture;
+
+        return context.create_texture(
+            width,
+            height,
+            format,
+            optimize_for_render_to_texture,
+            0,
+            class,
+            activation,
+        );
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn create_cube_texture<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let size = args.get_i32(0) as u32;
+        let format = args.get_string_non_null(activation, 1, "textureFormat")?;
+        let optimize_for_render_to_texture = args.get_bool(2);
+        let streaming_levels = args.get_i32(3) as u32;
+        let format = Context3DTextureFormat::from_wstr(&format)
+            .ok_or_else(|| make_error_2008(activation, "textureFormat"))?;
+
+        return context.create_cube_texture(
+            size,
+            format,
+            optimize_for_render_to_texture,
+            streaming_levels,
+            activation,
+        );
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_texture_at<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let sampler = args.get_i32(0) as u32;
+        let mut cube = false;
+        let texture_object = args.try_get_object(1);
+        let texture = if let Some(texture_object) = texture_object {
+            cube = texture_object.is_of_type(
+                activation
+                    .avm2()
+                    .classes()
+                    .cubetexture
+                    .inner_class_definition(),
+            );
+
+            Some(texture_object.as_texture().unwrap().handle())
+        } else {
+            None
+        };
+
+        context.set_texture_at(sampler, texture, cube);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_color_mask<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let red = args.get_bool(0);
+        let green = args.get_bool(1);
+        let blue = args.get_bool(2);
+        let alpha = args.get_bool(3);
+
+        context.set_color_mask(red, green, blue, alpha);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_depth_test<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let depth_mask = args.get_bool(0);
+        let pass_compare_mode = args.get_string_non_null(activation, 1, "passCompareMode")?;
+        let pass_compare_mode = Context3DCompareMode::from_wstr(&pass_compare_mode)
+            .ok_or_else(|| make_error_2008(activation, "passCompareMode"))?;
+
+        context.set_depth_test(depth_mask, pass_compare_mode);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_blend_factors<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let source_factor = args.get_string_non_null(activation, 0, "sourceFactor")?;
+        let destination_factor = args.get_string_non_null(activation, 1, "destinationFactor")?;
+
+        let source_factor = Context3DBlendFactor::from_wstr(&source_factor)
+            .ok_or_else(|| make_error_2008(activation, "sourceFactor"))?;
+
+        let destination_factor = Context3DBlendFactor::from_wstr(&destination_factor)
+            .ok_or_else(|| make_error_2008(activation, "destinationFactor"))?;
+
+        context.set_blend_factors(source_factor, destination_factor);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_render_to_texture<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    let context = this.as_context_3d().unwrap();
+    let texture = args
+        .get_object(activation, 0, "texture")?
+        .as_texture()
+        .unwrap();
+    let enable_depth_and_stencil = args.get_bool(1);
+    let anti_alias = args.get_u32(2);
+    let surface_selector = args.get_u32(3);
+    let color_output_index = args.get_u32(4);
+
+    let mut error = None;
+    if texture.instance_class() == activation.avm2().class_defs().cubetexture {
+        if surface_selector > 5 {
+            error = Some((
+                3772,
+                "Error #3772: Cube textures need to have surfaceSelector [0..5].",
+            ));
+        }
+    } else if texture.instance_class() == activation.avm2().class_defs().rectangletexture {
+        if surface_selector != 0 {
+            error = Some((
+                3773,
+                "Error #3773: Rectangle textures need to have surfaceSelector = 0.",
+            ));
+        }
+    } else {
+        // normal Texture or video texture (but the latter should probably not be supported here anyway)
+        if surface_selector != 0 {
+            error = Some((
+                3771,
+                "Error #3771: 2D textures need to have surfaceSelector = 0.",
+            ));
+        }
+    }
+    if let Some((code, message)) = error {
+        return Err(Error::avm_error(argument_error(activation, message, code)?));
+    }
+
+    if anti_alias != 0 {
+        avm2_stub_method!(
+            activation,
+            "flash.display3D.Context3D",
+            "setRenderToTexture",
+            "antiAlias != 0"
+        );
+    }
+
+    if color_output_index != 0 {
+        avm2_stub_method!(
+            activation,
+            "flash.display3D.Context3D",
+            "setRenderToTexture",
+            "colorOutputIndex != 0"
+        );
+    }
+
+    context.set_render_to_texture(
+        texture.handle(),
+        enable_depth_and_stencil,
+        anti_alias,
+        surface_selector,
+    );
+    Ok(Value::Undefined)
+}
+
+pub fn set_render_to_back_buffer<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    let context = this.as_context_3d().unwrap();
+    context.set_render_to_back_buffer();
+    Ok(Value::Undefined)
+}
+
+pub fn set_sampler_state_at<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(context) = this.as_context_3d() {
+        // This is a native method, so all of the arguments have been checked and coerced for us
+        let sampler = args.get_i32(0) as u32;
+        let wrap = args.get_string_non_null(activation, 1, "wrap")?;
+        let filter = args.get_string_non_null(activation, 2, "filter")?;
+        let mip_filter = args.get_string_non_null(activation, 3, "mipfilter")?;
+
+        let wrap = Context3DWrapMode::from_wstr(&wrap)
+            .ok_or_else(|| make_error_2008(activation, "wrap"))?;
+
+        let filter = Context3DTextureFilter::from_wstr(&filter)
+            .ok_or_else(|| make_error_2008(activation, "filter"))?;
+
+        if matches!(
+            filter,
+            Context3DTextureFilter::Anisotropic2X
+                | Context3DTextureFilter::Anisotropic4X
+                | Context3DTextureFilter::Anisotropic8X
+                | Context3DTextureFilter::Anisotropic16X
+        ) {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "setSamplerStateAt",
+                "filter == 'anisotropic'"
+            );
+        }
+
+        if &*mip_filter != b"mipnone" {
+            avm2_stub_method!(
+                activation,
+                "flash.display3D.Context3D",
+                "setSamplerStateAt",
+                "mipFilter != 'none'"
+            );
+        }
+
+        context.set_sampler_state_at(sampler, wrap, filter);
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn set_scissor_rectangle<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    let context3d = this.as_context_3d().unwrap();
+    let rectangle = args.try_get_object(0);
+    let rectangle = if let Some(rectangle) = rectangle {
+        let x = rectangle
+            .get_slot(rectangle_slots::X)
+            .coerce_to_number(activation)?;
+        let y = rectangle
+            .get_slot(rectangle_slots::Y)
+            .coerce_to_number(activation)?;
+        let width = rectangle
+            .get_slot(rectangle_slots::WIDTH)
+            .coerce_to_number(activation)?;
+        let height = rectangle
+            .get_slot(rectangle_slots::HEIGHT)
+            .coerce_to_number(activation)?;
+        Some(Rectangle {
+            x_min: Twips::from_pixels(x),
+            y_min: Twips::from_pixels(y),
+            x_max: Twips::from_pixels(x + width),
+            y_max: Twips::from_pixels(y + height),
+        })
+    } else {
+        None
+    };
+
+    context3d.set_scissor_rectangle(rectangle);
+    Ok(Value::Undefined)
+}
+
+pub fn dispose<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    avm2_stub_method!(activation, "flash.display3D.Context3D", "dispose");
+    this.as_context_3d()
+        .unwrap()
+        .stage3d()
+        .set_context3d(None, activation.gc());
+    Ok(Value::Undefined)
+}

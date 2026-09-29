@@ -1,8 +1,8 @@
-//! Desktop-only automation for development: `FLASHVITA_SCRIPT` drives the
+//! Desktop-only automation for development: `RUFFLEVITA_SCRIPT` drives the
 //! app with synthetic Vita input and writes screenshots, e.g.
 //!
 //! ```text
-//! FLASHVITA_SCRIPT="wait 30; shot lib.png; press Cross; sleep 4000; shot game.png; quit"
+//! RUFFLEVITA_SCRIPT="wait 30; shot lib.png; press Cross; sleep 4000; shot game.png; quit"
 //! ```
 
 use std::collections::VecDeque;
@@ -42,7 +42,7 @@ fn parse_btn(s: &str) -> Option<Btn> {
 
 impl Script {
     pub fn from_env() -> Option<Self> {
-        let text = std::env::var("FLASHVITA_SCRIPT").ok()?;
+        let text = std::env::var("RUFFLEVITA_SCRIPT").ok()?;
         let mut steps = VecDeque::new();
         for cmd in text.split(';').map(str::trim).filter(|c| !c.is_empty()) {
             let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -60,7 +60,7 @@ impl Script {
             };
             match step {
                 Some(s) => steps.push_back(s),
-                None => eprintln!("FLASHVITA_SCRIPT: ignoring '{cmd}'"),
+                None => eprintln!("RUFFLEVITA_SCRIPT: ignoring '{cmd}'"),
             }
         }
         Some(Script { steps, wait: 0, release: None, touch_up: None, until: None })

@@ -55,7 +55,7 @@ impl KeyPicker {
         rows.push(vec![
             Key { action: Action::None, label: "Nothing".into(), units: 4.0 },
             Key { action: Action::MouseLeft, label: "Mouse click".into(), units: 4.0 },
-            Key { action: Action::Menu, label: "FlashVita menu".into(), units: 4.0 },
+            Key { action: Action::Menu, label: "RuffleVita menu".into(), units: 4.0 },
         ]);
 
         // Lay out rows centred in the panel.

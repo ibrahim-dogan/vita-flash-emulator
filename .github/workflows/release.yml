@@ -26,13 +26,13 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flashvita-vpk
-          path: dist/flashvita.vpk
+          name: rufflevita-vpk
+          path: dist/rufflevita.vpk
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: FlashVita ${{ github.ref_name }}
+          name: RuffleVita ${{ github.ref_name }}
           body_path: docs/RELEASE_NOTES.md
-          files: dist/flashvita.vpk
+          files: dist/rufflevita.vpk
