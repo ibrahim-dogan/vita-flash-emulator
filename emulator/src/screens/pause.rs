@@ -2,7 +2,7 @@
 
 use crate::input::{Btn, InputEvent, Panel, TouchPhase};
 use crate::platform::{SCREEN_H, SCREEN_W};
-use crate::ui::{self, Color, FontId, Gfx, Icon, Rect, theme};
+use crate::ui::{self, FontId, Gfx, Icon, Rect, theme};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum PauseAction {
@@ -111,29 +111,26 @@ impl PauseMenu {
     }
 
     pub fn draw(&self, g: &mut Gfx, game_name: &str, fps: f32) {
-        g.rect(Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32), Color::hex(0x04060B).alpha(0.62));
-        ui::panel(g, PANEL);
-        let name = g.ellipsize(FontId::Bold, 20.0, game_name, PANEL.w - 56.0);
-        g.text_mid(FontId::Bold, 20.0, PANEL.x + 28.0, PANEL.y + 38.0, theme::TEXT, &name);
+        g.rect(Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32), theme::INK.alpha(0.55));
+        ui::card(g, PANEL, theme::RADIUS + 2.0, theme::PAPER);
+        let name = g.ellipsize(FontId::Display, 24.0, game_name, PANEL.w - 56.0);
+        g.text_mid(FontId::Display, 24.0, PANEL.x + 28.0, PANEL.y + 38.0, theme::INK, &name);
         let (h, m) = crate::platform::local_time();
         let info = format!("Paused \u{00b7} {fps:.0} FPS \u{00b7} {h:02}:{m:02}");
-        g.text_mid(FontId::Regular, 13.0, PANEL.x + 28.0, PANEL.y + 64.0, theme::DIM, &info);
-        g.rect(Rect::new(PANEL.x + 28.0, PANEL.y + 84.0, PANEL.w - 56.0, 1.0), theme::LINE);
+        g.text_mid(FontId::Bold, 13.5, PANEL.x + 28.0, PANEL.y + 66.0, theme::MUTED, &info);
+        g.rect(Rect::new(PANEL.x + 28.0, PANEL.y + 84.0, PANEL.w - 56.0, 2.0), theme::INK.alpha(0.15));
 
         for (i, (action, icon, label)) in ITEMS.iter().enumerate() {
             let r = Self::item_rect(i);
             let selected = i == self.sel;
             let confirming = self.confirm == Some(*action);
             if selected {
-                let c = if confirming { theme::DANGER.alpha(0.22) } else { theme::PANEL_HI };
-                g.rounded(r, 10.0, c);
-                g.rounded(Rect::new(r.x, r.y + 12.0, 3.0, r.h - 24.0), 1.5, if confirming { theme::DANGER } else { theme::ACCENT });
+                let fill = if confirming { theme::TOMATO } else { theme::SUN };
+                g.rounded_outline(r, 10.0, theme::BORDER, theme::INK, fill);
             }
-            let icolor = if confirming { theme::DANGER } else if selected { theme::ACCENT } else { theme::DIM };
-            g.icon(*icon, r.x + 16.0, r.center_y() - 11.0, 22.0, icolor);
+            g.icon(*icon, r.x + 16.0, r.center_y() - 11.0, 22.0, theme::INK);
             let text = if confirming { "Press Cross again to confirm" } else { label };
-            let color = if selected { theme::TEXT } else { theme::TEXT.alpha(0.85) };
-            g.text_mid(FontId::Bold, 16.0, r.x + 52.0, r.center_y(), color, text);
+            g.text_mid(FontId::Bold, 16.5, r.x + 52.0, r.center_y(), theme::INK, text);
         }
         ui::footer(g, &[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
     }

@@ -4,7 +4,7 @@ use crate::config::Action;
 use crate::input::{Btn, InputEvent, Panel, TouchPhase};
 use crate::keys;
 use crate::platform::{SCREEN_H, SCREEN_W};
-use crate::ui::{self, Color, FontId, Gfx, Rect, theme};
+use crate::ui::{self, FontId, Gfx, Rect, theme};
 
 pub enum PickResult {
     None,
@@ -152,36 +152,32 @@ impl KeyPicker {
     }
 
     pub fn draw(&self, g: &mut Gfx) {
-        g.rect(Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32), Color::hex(0x000000).alpha(0.45));
-        ui::panel(g, PANEL);
+        g.rect(Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32), theme::INK.alpha(0.55));
+        ui::card(g, PANEL, theme::RADIUS + 2.0, theme::PAPER);
         let cy = PANEL.y + 44.0;
         let mut x = PANEL.x + 32.0;
-        x += g.text_mid(FontId::Bold, 22.0, x, cy, theme::TEXT, "Bind") + 12.0;
+        x += g.text_mid(FontId::Display, 28.0, x, cy + 1.0, theme::INK, "Bind") + 14.0;
         let gw = ui::button_glyph_width(g, self.btn, 28.0);
         ui::button_glyph(g, self.btn, x + gw * 0.5, cy, 28.0);
         x += gw + 12.0;
-        g.text_mid(FontId::Regular, 16.0, x, cy + 1.0, theme::DIM, self.btn.label());
-        g.text_mid_right(FontId::Regular, 14.0, PANEL.right() - 32.0, cy + 1.0, theme::FAINT, "Pick the key this button presses");
+        g.text_mid(FontId::Bold, 16.0, x, cy + 1.0, theme::MUTED, self.btn.label());
+        g.text_mid_right(FontId::Regular, 14.0, PANEL.right() - 32.0, cy + 1.0, theme::MUTED, "Pick the key this button presses");
 
         for (ri, row) in self.rows.iter().enumerate() {
             for (ci, key) in row.iter().enumerate() {
                 let r = self.rects[ri][ci];
                 let selected = self.sel == (ri, ci);
                 let special = ri == self.rows.len() - 1;
-                let bg = if selected {
-                    theme::ACCENT
+                let fill = if selected {
+                    theme::SUN
                 } else if special {
-                    theme::PANEL_HI.mix(theme::ACCENT, 0.12)
+                    theme::PAPER
                 } else {
-                    theme::PANEL_HI
+                    theme::PAPER_DIM
                 };
-                if selected {
-                    g.shadow(r, 8.0, theme::ACCENT.alpha(0.35));
-                }
-                g.rounded(r, 8.0, bg);
+                ui::card_with(g, r, 8.0, fill, 2.0, if selected { 3.0 } else { 2.0 });
                 let px = if key.label.chars().count() > 3 { 13.0 } else { 16.0 };
-                let color = if selected { Color::hex(0xFFFFFF) } else { theme::TEXT };
-                g.text_mid_center(FontId::Bold, px, r.center_x(), r.center_y(), color, &key.label);
+                g.text_mid_center(FontId::Bold, px, r.center_x(), r.center_y(), theme::INK, &key.label);
             }
         }
         ui::footer(g, &[(Btn::Circle, "Cancel"), (Btn::Cross, "Choose")]);

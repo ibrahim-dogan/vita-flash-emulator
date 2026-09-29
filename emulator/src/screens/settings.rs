@@ -5,7 +5,7 @@ use crate::config::{Profile, Quality, ScaleMode, StickMode};
 use crate::input::{Btn, InputEvent, Panel, TouchPhase};
 use crate::platform::{SCREEN_H, SCREEN_W};
 use crate::screens::keypicker::{KeyPicker, PickResult};
-use crate::ui::{self, Color, FontId, Gfx, Icon, Rect, theme};
+use crate::ui::{self, FontId, Gfx, Icon, Rect, theme};
 
 pub enum SettingsResult {
     None,
@@ -279,46 +279,33 @@ impl SettingsScreen {
     }
 
     pub fn draw(&mut self, g: &mut Gfx) {
-        g.rect(Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32), Color::hex(0x000000).alpha(0.5));
-        ui::panel(g, PANEL);
+        g.rect(Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32), theme::INK.alpha(0.55));
+        ui::card(g, PANEL, theme::RADIUS + 2.0, theme::PAPER);
 
         let cy = PANEL.y + 38.0;
-        g.icon(Icon::Sliders, PANEL.x + 28.0, cy - 12.0, 24.0, theme::ACCENT);
-        g.text_mid(FontId::Bold, 22.0, PANEL.x + 62.0, cy, theme::TEXT, "Game settings");
-        let name = g.ellipsize(FontId::Regular, 15.0, &self.game_name, 330.0);
-        g.text_mid_right(FontId::Regular, 15.0, PANEL.right() - 28.0, cy + 1.0, theme::DIM, &name);
+        g.icon(Icon::Sliders, PANEL.x + 28.0, cy - 12.0, 24.0, theme::INK);
+        g.text_mid(FontId::Display, 26.0, PANEL.x + 62.0, cy + 1.0, theme::INK, "Game settings");
+        let name = g.ellipsize(FontId::Bold, 15.0, &self.game_name, 330.0);
+        g.text_mid_right(FontId::Bold, 15.0, PANEL.right() - 28.0, cy + 1.0, theme::MUTED, &name);
 
         // Tabs.
-        let mut x = PANEL.x + 28.0;
-        let ty = PANEL.y + 64.0;
-        let lw = ui::button_glyph_width(g, Btn::L, 22.0);
-        ui::button_glyph(g, Btn::L, x + lw * 0.5, ty + 17.0, 22.0);
-        x += lw + 10.0;
-        for (i, (tab, name)) in [(Tab::Controls, "Controls"), (Tab::Display, "Display")].into_iter().enumerate() {
-            let w = g.measure(FontId::Bold, 15.0, name) + 32.0;
-            let r = Rect::new(x, ty, w, 34.0);
-            let active = self.tab == tab;
-            g.rounded(r, 17.0, if active { theme::ACCENT } else { theme::PANEL_HI });
-            g.text_mid_center(FontId::Bold, 15.0, r.center_x(), r.center_y(), if active { Color::hex(0xFFFFFF) } else { theme::DIM }, name);
+        let rects = ui::tabs(g, PANEL.x + 28.0, PANEL.y + 82.0, &["Controls", "Display"], (self.tab == Tab::Display) as usize);
+        for (i, r) in rects.into_iter().enumerate().take(2) {
             self.tab_rects[i] = r;
-            x += w + 8.0;
         }
-        let rw = ui::button_glyph_width(g, Btn::R, 22.0);
-        ui::button_glyph(g, Btn::R, x + 2.0 + rw * 0.5, ty + 17.0, 22.0);
 
         // Rows.
         let rows = self.rows();
         let list = Rect::new(PANEL.x + 16.0, LIST_TOP, PANEL.w - 32.0, LIST_H);
         g.push_clip(list);
         for (i, row) in rows.iter().enumerate() {
-            let r = Rect::new(list.x, list.y + i as f32 * ROW_H - self.scroll, list.w, ROW_H - 4.0);
+            let r = Rect::new(list.x, list.y + i as f32 * ROW_H - self.scroll, list.w - 8.0, ROW_H - 4.0);
             if r.bottom() < list.y || r.y > list.bottom() {
                 continue;
             }
             let selected = i == self.cursor;
             if selected {
-                g.rounded(r, 10.0, theme::PANEL_HI);
-                g.rounded(Rect::new(r.x, r.y + 10.0, 3.0, r.h - 20.0), 1.5, theme::ACCENT);
+                g.rounded_outline(r, 10.0, theme::BORDER, theme::INK, theme::SUN);
             }
             let mut lx = r.x + 16.0;
             match row {
@@ -328,51 +315,45 @@ impl SettingsScreen {
                     lx += gw.max(24.0) + 12.0;
                 }
                 Row::LeftStick | Row::RightStick => {
-                    g.icon(Icon::Stick, lx, r.center_y() - 12.0, 24.0, theme::DIM);
+                    g.icon(Icon::Stick, lx, r.center_y() - 12.0, 24.0, theme::INK);
                     lx += 36.0;
                 }
                 Row::ResetControls => {
-                    g.icon(Icon::Refresh, lx, r.center_y() - 11.0, 22.0, theme::WARN);
+                    g.icon(Icon::Refresh, lx, r.center_y() - 11.0, 22.0, theme::INK);
                     lx += 36.0;
                 }
                 Row::MakeDefault => {
-                    g.icon(Icon::Check, lx, r.center_y() - 11.0, 22.0, theme::OK);
+                    g.icon(Icon::Check, lx, r.center_y() - 11.0, 22.0, theme::INK);
                     lx += 36.0;
                 }
                 _ => {}
             }
             let (label, help) = Self::label(*row);
-            let color = if selected { theme::TEXT } else { theme::TEXT.alpha(0.85) };
             match (help, selected) {
                 (Some(h), true) => {
-                    g.text_mid(FontId::Bold, 15.0, lx, r.center_y() - 8.0, color, label);
-                    g.text_mid(FontId::Regular, 12.0, lx, r.center_y() + 10.0, theme::DIM, h);
+                    g.text_mid(FontId::Bold, 15.5, lx, r.center_y() - 8.0, theme::INK, label);
+                    g.text_mid(FontId::Regular, 12.0, lx, r.center_y() + 10.0, theme::INK.alpha(0.7), h);
                 }
                 _ => {
-                    g.text_mid(FontId::Bold, 15.0, lx, r.center_y(), color, label);
+                    g.text_mid(FontId::Bold, 15.5, lx, r.center_y(), theme::INK, label);
                 }
             }
 
             let (value, cyclable) = self.value(*row);
             if !value.is_empty() {
                 let right = r.right() - 16.0;
-                let vcolor = if selected { theme::ACCENT } else { theme::DIM };
+                let vcolor = if selected { theme::INK } else { theme::MUTED };
                 if cyclable && selected {
-                    g.icon(Icon::ChevronRight, right - 16.0, r.center_y() - 8.0, 16.0, theme::ACCENT);
-                    let w = g.text_mid_right(FontId::Bold, 15.0, right - 22.0, r.center_y(), vcolor, &value);
-                    g.icon(Icon::ChevronLeft, right - 22.0 - w - 22.0, r.center_y() - 8.0, 16.0, theme::ACCENT);
+                    g.icon(Icon::ChevronRight, right - 16.0, r.center_y() - 8.0, 16.0, theme::INK);
+                    let w = g.text_mid_right(FontId::Bold, 15.5, right - 22.0, r.center_y(), vcolor, &value);
+                    g.icon(Icon::ChevronLeft, right - 22.0 - w - 22.0, r.center_y() - 8.0, 16.0, theme::INK);
                 } else {
-                    g.text_mid_right(FontId::Bold, 15.0, right, r.center_y(), vcolor, &value);
+                    g.text_mid_right(FontId::Bold, 15.5, right, r.center_y(), vcolor, &value);
                 }
             }
         }
         g.pop_clip();
-        let total = rows.len() as f32 * ROW_H;
-        if total > LIST_H {
-            let h = (LIST_H * LIST_H / total).max(30.0);
-            let y = LIST_TOP + (self.scroll / (total - LIST_H)).clamp(0.0, 1.0) * (LIST_H - h);
-            g.rounded(Rect::new(PANEL.right() - 9.0, y, 3.0, h), 1.5, theme::FAINT.alpha(0.7));
-        }
+        crate::screens::scrollbar(g, list, self.scroll, rows.len() as f32 * ROW_H);
 
         let action = match rows.get(self.cursor) {
             Some(Row::Button(_)) => "Change",

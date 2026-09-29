@@ -1,19 +1,22 @@
 //! RuffleVita: a Flash player for PS Vita built on Ruffle.
 //!
-//! The app is a small state machine: Library -> Loading -> Playing, with
-//! modal overlays (pause menu, settings, key picker) on top. Slow work runs
-//! on a worker thread; the main thread only handles input, ticks Ruffle and
-//! draws.
+//! The app is a small state machine: Library (with its Explore tab) ->
+//! Loading -> Playing, with modal overlays (pause menu, settings, key picker)
+//! on top. Slow work runs on a worker thread and network work on two more;
+//! the main thread only handles input, ticks Ruffle and draws.
 
 #![feature(alloc_error_hook)]
 
 #[cfg(not(target_os = "vita"))]
 mod assets;
 mod backends;
+mod catalog;
 mod config;
+mod fetcher;
 mod input;
 mod keys;
 mod library;
+mod net;
 mod platform;
 mod screens;
 #[cfg(not(target_os = "vita"))]
@@ -34,8 +37,10 @@ use config::{Settings, Sort};
 use input::{Input, InputEvent};
 use library::Library;
 use platform::{SCREEN_H, SCREEN_W};
-use screens::ThumbCache;
+use fetcher::Fetcher;
+use screens::explore::{ExploreAction, ExploreScreen};
 use screens::library::{LibAction, LibraryScreen};
+use screens::{Tab, ThumbCache};
 use screens::loading::LoadingScreen;
 use screens::pause::{PauseAction, PauseMenu};
 use screens::settings::{SettingsResult, SettingsScreen};
@@ -289,6 +294,10 @@ struct App {
     settings: Settings,
     thumbs: ThumbCache,
     lib_screen: LibraryScreen,
+    explore: ExploreScreen,
+    /// Started the first time Explore opens.
+    fetcher: Option<Fetcher>,
+    tab: Tab,
     mode: Mode,
     session: Option<Session>,
     modal: Option<Modal>,
@@ -333,6 +342,9 @@ impl App {
             settings,
             thumbs: ThumbCache::new(),
             lib_screen: LibraryScreen::new(),
+            explore: ExploreScreen::new(),
+            fetcher: None,
+            tab: Tab::Library,
             mode: Mode::Library,
             session: None,
             modal: None,
@@ -447,9 +459,13 @@ impl App {
 
             // In the library with nothing moving, drop to ~2 fps (clock and
             // battery still update) instead of burning battery at 60.
+            let screen_busy = match self.tab {
+                Tab::Library => self.lib_screen.animating(),
+                Tab::Explore => self.explore.animating() || self.explore.searching,
+            };
             let idle = matches!(self.mode, Mode::Library)
                 && self.modal.is_none()
-                && !self.lib_screen.animating()
+                && !screen_busy
                 && self.toast.is_none()
                 && Instant::now() > self.busy_until;
             #[cfg(not(target_os = "vita"))]
@@ -473,13 +489,27 @@ impl App {
         self.session = None;
         self.lib.save_if_dirty();
         self.settings.save();
+        self.explore.save();
     }
 
     // ------------------------------------------------------------ worker
 
     fn handle_worker_results(&mut self) -> bool {
+        let net = self.fetcher.as_ref().map(|f| f.poll()).unwrap_or_default();
+        let mut any = !net.is_empty();
+        for done in net {
+            let downloaded = matches!(&done, fetcher::Done::Downloaded { result: Ok(_), .. });
+            if let Some(msg) = self.explore.on_result(done, &self.gfx, &self.lib) {
+                self.toast = Some(Toast::lasting(msg, 3000));
+            }
+            if downloaded {
+                self.rescan_library();
+                self.explore.refresh_owned(&self.lib);
+                self.explore.save();
+            }
+        }
         let results = self.worker.poll();
-        let any = !results.is_empty();
+        any |= !results.is_empty();
         for done in results {
             match done {
                 Done::Info { key, info } => self.lib.update(&key, |db| match info {
@@ -735,6 +765,7 @@ impl App {
                 }
             }
             None => match &mut self.mode {
+                Mode::Library if self.tab == Tab::Explore => self.update_explore(events, dt),
                 Mode::Library => match self.lib_screen.update(events, &self.lib, dt) {
                     LibAction::None => {}
                     LibAction::Play(i) => self.start_game(i),
@@ -755,13 +786,9 @@ impl App {
                             self.lib_screen.select(i, &self.lib);
                         }
                     }
+                    LibAction::SwitchTab(tab) => self.switch_tab(tab),
                     LibAction::Rescan => {
-                        let key = self.lib.games.get(self.lib_screen.selected).map(|g| g.key.clone());
-                        self.lib.rescan();
-                        self.lib.sort(self.settings.sort);
-                        self.queue_analysis();
-                        let i = key.and_then(|k| self.lib.index_of(&k)).unwrap_or(0);
-                        self.lib_screen.select(i, &self.lib);
+                        self.rescan_library();
                         let n = self.lib.games.len();
                         self.toast = Some(Toast::new(match n {
                             0 => "No games found".to_owned(),
@@ -779,6 +806,73 @@ impl App {
                 }
                 Mode::Playing => {}
             },
+        }
+    }
+
+    /// Re-reads the games folder, keeping the selection.
+    fn rescan_library(&mut self) {
+        let key = self.lib.games.get(self.lib_screen.selected).map(|g| g.key.clone());
+        self.lib.rescan();
+        self.lib.sort(self.settings.sort);
+        self.queue_analysis();
+        let i = key.and_then(|k| self.lib.index_of(&k)).unwrap_or(0);
+        self.lib_screen.select(i, &self.lib);
+    }
+
+    fn switch_tab(&mut self, tab: Tab) {
+        if tab == Tab::Explore {
+            let fetcher = self.fetcher.get_or_insert_with(Fetcher::spawn);
+            self.explore.open(fetcher, &self.lib);
+        }
+        self.tab = tab;
+        self.input.clear_events();
+    }
+
+    fn update_explore(&mut self, events: &[InputEvent], dt: f32) {
+        let Some(fetcher) = self.fetcher.as_ref() else { return };
+        if self.explore.searching {
+            // The on-screen keyboard owns the buttons while it's open.
+            #[cfg(target_os = "vita")]
+            if !self.video.text_input().is_screen_keyboard_shown(&self.window) {
+                self.explore.searching = false;
+            }
+            let typed: Vec<InputEvent> = events
+                .iter()
+                .filter(|e| matches!(e, InputEvent::Text(_) | InputEvent::Backspace | InputEvent::Enter))
+                .cloned()
+                .collect();
+            self.explore.update(&typed, fetcher, dt);
+            if !self.explore.searching {
+                self.video.text_input().stop();
+                self.input.typing = false;
+                self.input.clear_events();
+            }
+            return;
+        }
+        match self.explore.update(events, fetcher, dt) {
+            ExploreAction::None => {}
+            ExploreAction::SwitchTab(tab) => self.switch_tab(tab),
+            ExploreAction::StartSearch => {
+                self.video.text_input().start();
+                self.input.typing = true;
+            }
+            ExploreAction::Download { slug, file_name } => {
+                fetcher.download(slug, platform::games_dir().join(file_name));
+            }
+            ExploreAction::CancelDownload => fetcher.cancel_download(),
+            ExploreAction::Play(file_name) => {
+                let found = self.lib.games.iter().position(|g| {
+                    g.path.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&file_name))
+                });
+                match found {
+                    Some(i) => {
+                        self.tab = Tab::Library;
+                        self.lib_screen.select(i, &self.lib);
+                        self.start_game(i);
+                    }
+                    None => self.toast = Some(Toast::new("Refresh the library to see this game")),
+                }
+            }
         }
     }
 
@@ -804,11 +898,14 @@ impl App {
                 }
             }
             Mode::Library => {
-                g.clear(ui::theme::BG_BOTTOM);
-                self.lib_screen.draw(g, &self.lib, &self.settings, &mut self.thumbs, &self.worker, self.analyzing > 0);
+                g.clear(ui::theme::BLUE);
+                match (self.tab, &self.fetcher) {
+                    (Tab::Explore, Some(f)) => self.explore.draw(g, f),
+                    _ => self.lib_screen.draw(g, &self.lib, &self.settings, &mut self.thumbs, &self.worker, self.analyzing > 0),
+                }
             }
             Mode::Loading(ls) => {
-                g.clear(ui::theme::BG_BOTTOM);
+                g.clear(ui::theme::BLUE);
                 ls.draw(g, &self.thumbs);
             }
         }

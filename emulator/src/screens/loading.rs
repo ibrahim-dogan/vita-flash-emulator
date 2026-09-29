@@ -30,43 +30,52 @@ impl LoadingScreen {
     }
 
     pub fn draw(&self, g: &mut Gfx, thumbs: &ThumbCache) {
-        let full = Rect::new(0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32);
-        g.rect(full, Color::hex(0x05070C));
-        if let Some(tex) = thumbs.get(&self.key) {
-            g.image_cover(tex, full, Color::hex(0xFFFFFF).alpha(0.22));
-        }
-        g.rect_v(full, Color::hex(0x05070C).alpha(0.2), Color::hex(0x05070C).alpha(0.9));
-
+        ui::background(g);
         let cx = SCREEN_W as f32 * 0.5;
-        let name = g.ellipsize(FontId::Bold, 26.0, &self.name, 760.0);
-        g.text_mid_center(FontId::Bold, 26.0, cx, 300.0, theme::TEXT, &name);
+        let card = Rect::new(cx - 250.0, 64.0, 500.0, 230.0);
+        g.rounded(card.offset(theme::SHADOW, theme::SHADOW), theme::RADIUS + 2.0, theme::INK);
+        g.rounded(card, theme::RADIUS + 2.0, theme::INK);
+        let inner = card.inset(theme::BORDER);
+        match thumbs.get(&self.key) {
+            Some(tex) => {
+                g.image_contain(tex, inner, Color::hex(0xFFFFFF));
+            }
+            None => {
+                g.push_clip(inner);
+                ui::generated_cover(g, inner, &self.name, ui::cover_color(&self.key), true);
+                g.pop_clip();
+            }
+        }
+        g.round_corners(inner, theme::RADIUS - 1.0, theme::INK);
+
+        let name = g.ellipsize(FontId::Display, 32.0, &self.name, 760.0);
+        ui::shadow_text_center(g, FontId::Display, 32.0, cx, 340.0, theme::PAPER, &name);
 
         if let Some(err) = &self.error {
-            g.text_mid_center(FontId::Bold, 16.0, cx, 340.0, theme::DANGER, "This game couldn't be started");
-            let lines = g.wrap(FontId::Regular, 14.0, err, 700.0, 3);
+            let msg = Rect::new(cx - 330.0, 374.0, 660.0, 96.0);
+            ui::card(g, msg, 12.0, theme::TOMATO);
+            g.text_mid_center(FontId::Bold, 17.0, cx, msg.y + 26.0, theme::INK, "This game couldn't be started");
+            let lines = g.wrap(FontId::Regular, 14.0, err, msg.w - 40.0, 2);
             for (i, l) in lines.iter().enumerate() {
-                g.text_mid_center(FontId::Regular, 14.0, cx, 368.0 + i as f32 * 20.0, theme::DIM, l);
+                g.text_mid_center(FontId::Regular, 14.0, cx, msg.y + 52.0 + i as f32 * 20.0, theme::INK, l);
             }
             ui::footer(g, &[(Btn::Cross, "Back to library")]);
             return;
         }
 
-        let t = self.started.elapsed().as_secs_f32();
-        ui::spinner(g, cx, 230.0, 40.0, theme::ACCENT, t);
-        let bar = Rect::new(cx - 160.0, 340.0, 320.0, 6.0);
-        g.rounded(bar, 3.0, theme::PANEL_HI);
         let p = self.progress.clamp(0.0, 1.0);
-        if p > 0.0 {
-            g.rounded(Rect::new(bar.x, bar.y, (bar.w * p).max(6.0), bar.h), 3.0, theme::ACCENT);
-        }
         let status = if p < 1.0 { "Loading\u{2026}" } else { "Starting\u{2026}" };
-        g.text_mid_center(FontId::Regular, 14.0, cx, 368.0, theme::DIM, status);
+        ui::progress_bar(g, Rect::new(cx - 200.0, 380.0, 400.0, 34.0), p, status, &format!("{:.0}%", p * 100.0));
+        let t = self.started.elapsed().as_secs_f32();
+        if p >= 1.0 {
+            ui::spinner(g, cx + 228.0, 397.0, 26.0, theme::PAPER, t);
+        }
         g.text_mid_center(
-            FontId::Regular,
-            13.0,
+            FontId::Bold,
+            13.5,
             cx,
             SCREEN_H as f32 - 30.0,
-            theme::FAINT,
+            theme::ON_BLUE_DIM,
             "Tip: press SELECT in-game for the menu \u{00b7} L + R + START always works",
         );
     }

@@ -520,26 +520,27 @@ impl Session {
             g.icon(Icon::CursorFill, ox, oy, size, crate::ui::Color::hex(0xFFFFFF));
         }
         if self.profile.show_fps {
+            use crate::ui::{FontId, Rect};
             let text = format!("{:.0} FPS", self.fps);
-            let w = g.measure(crate::ui::FontId::Bold, 13.0, &text) + 16.0;
-            let r = crate::ui::Rect::new(8.0, 8.0, w, 22.0);
-            g.rounded(r, 11.0, crate::ui::Color::hex(0x000000).alpha(0.55));
+            let w = g.measure(FontId::Bold, 13.0, &text) + 16.0;
+            let r = Rect::new(8.0, 8.0, w.round(), 22.0);
+            g.rounded(r, 7.0, theme::INK.alpha(0.85));
             let color = if self.fps >= 50.0 {
-                theme::OK
+                theme::MINT
             } else if self.fps >= 24.0 {
-                theme::WARN
+                theme::SUN
             } else {
-                theme::DANGER
+                theme::TOMATO
             };
-            g.text_mid(crate::ui::FontId::Bold, 13.0, r.x + 8.0, r.center_y(), color, &text);
+            g.text_mid(FontId::Bold, 13.0, r.x + 8.0, r.center_y(), color, &text);
 
             let mem = crate::platform::memory_summary();
             let lines = std::iter::once(self.perf_line.as_str()).chain(mem.as_deref());
             for (i, line) in lines.filter(|l| !l.is_empty()).enumerate() {
-                let w = g.measure(crate::ui::FontId::Regular, 12.0, line) + 16.0;
-                let r = crate::ui::Rect::new(8.0, 34.0 + i as f32 * 22.0, w, 20.0);
-                g.rounded(r, 10.0, crate::ui::Color::hex(0x000000).alpha(0.55));
-                g.text_mid(crate::ui::FontId::Regular, 12.0, r.x + 8.0, r.center_y(), theme::TEXT, line);
+                let w = g.measure(FontId::Regular, 12.0, line) + 16.0;
+                let r = Rect::new(8.0, 34.0 + i as f32 * 22.0, w.round(), 20.0);
+                g.rounded(r, 6.0, theme::INK.alpha(0.85));
+                g.text_mid(FontId::Regular, 12.0, r.x + 8.0, r.center_y(), theme::PAPER, line);
             }
         }
     }
