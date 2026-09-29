@@ -67,7 +67,7 @@ impl Worker {
         let (tx, results) = channel();
         let s = shared.clone();
         std::thread::Builder::new()
-            .name("flashvita-worker".into())
+            .name("rufflevita-worker".into())
             .stack_size(1024 * 1024)
             .spawn(move || run(s, tx))
             .expect("couldn't spawn worker thread");

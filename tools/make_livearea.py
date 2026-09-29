@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Converts the artwork rendered by `FLASHVITA_RENDER_ASSETS` into the 8-bit
+"""Converts the artwork rendered by `RUFFLEVITA_RENDER_ASSETS` into the 8-bit
 palette PNGs the Vita's LiveArea requires, in emulator/static/vita/sce_sys.
 
-    cd emulator && FLASHVITA_RENDER_ASSETS=/tmp/art cargo run
+    cd emulator && RUFFLEVITA_RENDER_ASSETS=/tmp/art cargo run
     python3 tools/make_livearea.py /tmp/art
 """
 import sys

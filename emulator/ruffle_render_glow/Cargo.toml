@@ -24,8 +24,8 @@ assigning_clones = "allow"       # Sometimes useful, but more often than not it 
 [dependencies]
 log = "0.4"
 glow = { git = "https://github.com/grovesNL/glow", branch = "main", features = [] }
-ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = ["tessellator"] }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = ["tessellator"] }
 bytemuck = { version = "1.23.2", features = ["derive"] }
-swf = { git = "https://github.com/ruffle-rs/ruffle", branch = "master" }
+swf = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }
 thiserror = "2.0.16"
 image = { version = "0.25.6", default-features = false }

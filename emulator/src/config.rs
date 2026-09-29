@@ -17,7 +17,7 @@ pub enum Action {
     None,
     Key(u16),
     MouseLeft,
-    /// Opens FlashVita's pause menu.
+    /// Opens RuffleVita's pause menu.
     Menu,
 }
 
@@ -27,7 +27,7 @@ impl Action {
             Action::None => "\u{2014}".into(),
             Action::Key(k) => keys::display_name(k),
             Action::MouseLeft => "Mouse click".into(),
-            Action::Menu => "FlashVita menu".into(),
+            Action::Menu => "RuffleVita menu".into(),
         }
     }
 }

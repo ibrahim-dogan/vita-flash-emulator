@@ -1,0 +1,17 @@
+[package]
+name = "ruffle_common"
+authors.workspace = true
+edition = "2024"
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hashbrown = { workspace = true }
+fnv = { workspace = true }
+gc-arena = { workspace = true }
+ruffle_wstr = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }

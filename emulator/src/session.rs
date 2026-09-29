@@ -33,6 +33,14 @@ pub enum Signal {
 
 const MOUSE_FROM_BUTTON: u8 = 1;
 const MOUSE_FROM_TOUCH: u8 = 2;
+/// How long a single script may run before Ruffle stops it. Flash Player
+/// allows 15 s on a desktop PC; the Vita is dozens of times slower, and games
+/// that build a level in one go (Happy Wheels) need far longer. It only
+/// matters for scripts stuck in a loop, where the app would wait this long.
+const MAX_SCRIPT_DURATION: Duration =
+    Duration::from_secs(if cfg!(target_os = "vita") { 120 } else { 15 });
+/// How long the mouse stays on the stage after its last use.
+const MOUSE_IDLE: Duration = Duration::from_secs(5);
 
 struct RearTouch {
     finger: i64,
@@ -57,6 +65,10 @@ pub struct Session {
     /// Keys held by stick directions: [left, right] x [up, down, left, right].
     stick_keys: [[Option<u16>; 4]; 2],
     mouse_sources: u8,
+    /// Last mouse activity (cursor, touch, click). While the mouse is on the
+    /// stage Ruffle hit-tests the whole display list after every update, so
+    /// it is taken off the stage when idle.
+    mouse_used: Option<Instant>,
     cursor: (f32, f32),
     cursor_shown_until: Instant,
     front_finger: Option<i64>,
@@ -66,6 +78,10 @@ pub struct Session {
     fps_since: Instant,
     running: bool,
     pub fps: f32,
+    perf: PerfTotals,
+    /// Per-frame breakdown shown under the FPS counter.
+    perf_line: String,
+    perf_logged: Instant,
     pub started: Instant,
     pub auto_cover_taken: bool,
     missing: MissingFiles,
@@ -105,7 +121,7 @@ impl Session {
             .with_scale_mode(scale, force)
             .with_quality(profile.quality.stage_quality())
             .with_player_runtime(PlayerRuntime::FlashPlayer)
-            .with_max_execution_duration(Duration::from_secs(12))
+            .with_max_execution_duration(MAX_SCRIPT_DURATION)
             .with_autoplay(true)
             .build();
 
@@ -123,6 +139,7 @@ impl Session {
             active: [None; 12],
             stick_keys: [[None; 4]; 2],
             mouse_sources: 0,
+            mouse_used: None,
             cursor: (SCREEN_W as f32 * 0.5, SCREEN_H as f32 * 0.5),
             cursor_shown_until: now,
             front_finger: None,
@@ -131,6 +148,9 @@ impl Session {
             fps_since: now,
             running: true,
             fps: 0.0,
+            perf: PerfTotals::default(),
+            perf_line: String::new(),
+            perf_logged: now,
             started: now,
             auto_cover_taken: false,
             missing,
@@ -200,6 +220,7 @@ impl Session {
     }
 
     fn mouse_move(&mut self) {
+        self.mouse_used = Some(Instant::now());
         let (x, y) = self.cursor;
         self.send(PlayerEvent::MouseMove { x: x as f64, y: y as f64 });
     }
@@ -224,6 +245,7 @@ impl Session {
             return;
         }
         self.mouse_sources &= !source;
+        self.mouse_used = Some(Instant::now());
         if self.mouse_sources == 0 {
             let (x, y) = self.cursor;
             self.send(PlayerEvent::MouseUp { x: x as f64, y: y as f64, button: MouseButton::Left });
@@ -400,10 +422,11 @@ impl Session {
     }
 
     fn flush_events(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
+        let mouse_active =
+            self.mouse_sources != 0 || self.mouse_used.is_some_and(|t| t.elapsed() < MOUSE_IDLE);
         let mut player = self.player.lock().unwrap();
+        // Set before handling events so the first click after idling still hits.
+        player.set_mouse_in_stage(mouse_active);
         for ev in self.pending.drain(..) {
             player.handle_event(ev);
         }
@@ -415,6 +438,7 @@ impl Session {
         self.running = running;
         self.fps_frames = 0;
         self.fps_since = Instant::now();
+        self.perf = PerfTotals::default();
         let mut player = self.player.lock().unwrap();
         player.set_is_playing(running);
         if !running {
@@ -433,6 +457,7 @@ impl Session {
         self.last_tick = now;
         self.executor.run();
         self.player.lock().unwrap().tick(dt);
+        self.perf.tick += now.elapsed();
     }
 
     pub fn needs_render(&self) -> bool {
@@ -444,7 +469,9 @@ impl Session {
     }
 
     pub fn render(&mut self) {
+        let start = Instant::now();
         self.player.lock().unwrap().render();
+        self.perf.render += start.elapsed();
         if !self.running {
             return;
         }
@@ -452,8 +479,33 @@ impl Session {
         let el = self.fps_since.elapsed().as_secs_f32();
         if el >= 1.0 {
             self.fps = self.fps_frames as f32 / el;
+            self.update_perf_line();
             self.fps_frames = 0;
             self.fps_since = Instant::now();
+        }
+    }
+
+    /// Time spent flushing the overlay and swapping buffers, which is where
+    /// vitaGL waits for the GPU to finish the previous frame.
+    pub fn add_present_time(&mut self, d: Duration) {
+        self.perf.present += d;
+    }
+
+    fn update_perf_line(&mut self) {
+        let frames = self.fps_frames.max(1) as f32;
+        let ms = |d: Duration| d.as_secs_f32() * 1000.0 / frames;
+        let p = std::mem::take(&mut self.perf);
+        let draws = ruffle_render_glow::take_draw_calls() as f32 / frames;
+        self.perf_line = format!(
+            "tick {:.1} \u{b7} render {:.1} \u{b7} present {:.1} ms \u{b7} {draws:.0} draws",
+            ms(p.tick),
+            ms(p.render),
+            ms(p.present),
+        );
+        if self.profile.show_fps && self.perf_logged.elapsed() >= Duration::from_secs(10) {
+            self.perf_logged = Instant::now();
+            let mem = crate::platform::memory_summary().unwrap_or_default();
+            tracing::info!("{}: {:.1} FPS \u{b7} {} \u{b7} {mem}", self.key, self.fps, self.perf_line);
         }
     }
 
@@ -480,6 +532,15 @@ impl Session {
                 theme::DANGER
             };
             g.text_mid(crate::ui::FontId::Bold, 13.0, r.x + 8.0, r.center_y(), color, &text);
+
+            let mem = crate::platform::memory_summary();
+            let lines = std::iter::once(self.perf_line.as_str()).chain(mem.as_deref());
+            for (i, line) in lines.filter(|l| !l.is_empty()).enumerate() {
+                let w = g.measure(crate::ui::FontId::Regular, 12.0, line) + 16.0;
+                let r = crate::ui::Rect::new(8.0, 34.0 + i as f32 * 22.0, w, 20.0);
+                g.rounded(r, 10.0, crate::ui::Color::hex(0x000000).alpha(0.55));
+                g.text_mid(crate::ui::FontId::Regular, 12.0, r.x + 8.0, r.center_y(), theme::TEXT, line);
+            }
         }
     }
 
@@ -540,4 +601,12 @@ fn scale_mode(mode: ScaleMode) -> (StageScaleMode, bool) {
         ScaleMode::Zoom => (StageScaleMode::NoBorder, true),
         ScaleMode::Native => (StageScaleMode::ShowAll, false),
     }
+}
+
+/// Time accumulated per phase since the FPS counter last updated.
+#[derive(Default)]
+struct PerfTotals {
+    tick: Duration,
+    render: Duration,
+    present: Duration,
 }

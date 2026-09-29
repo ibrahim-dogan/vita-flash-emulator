@@ -246,7 +246,7 @@ fn header(g: &mut Gfx, count: usize, analyzing: bool) {
     let logo = Rect::new(22.0, 17.0, 32.0, 32.0);
     ui::logo(g, logo);
     let x = logo.right() + 12.0;
-    let w = g.text_mid(FontId::Bold, 22.0, x, logo.center_y(), theme::TEXT, "FlashVita");
+    let w = g.text_mid(FontId::Bold, 22.0, x, logo.center_y(), theme::TEXT, "RuffleVita");
     let label = match count {
         0 => String::new(),
         1 => "1 game".into(),

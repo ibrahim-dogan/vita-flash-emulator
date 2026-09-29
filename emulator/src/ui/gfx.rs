@@ -1,4 +1,4 @@
-//! A small batched 2D renderer for FlashVita's UI.
+//! A small batched 2D renderer for RuffleVita's UI.
 //!
 //! Everything (text, rounded rectangles, soft shadows, icons) is drawn from
 //! one RGBA atlas plus optional image textures, accumulated into a single

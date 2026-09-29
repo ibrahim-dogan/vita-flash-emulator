@@ -1,7 +1,7 @@
 //! Desktop-only: renders the LiveArea artwork (icon, boot image, background,
 //! gate button) with the app's own renderer so it matches the UI exactly.
 //!
-//! `FLASHVITA_RENDER_ASSETS=<dir> cargo run` writes true-colour PNGs; the
+//! `RUFFLEVITA_RENDER_ASSETS=<dir> cargo run` writes true-colour PNGs; the
 //! Vita wants 8-bit palette PNGs, so `tools/make_livearea.py` converts them.
 
 use glow::HasContext;
@@ -27,12 +27,12 @@ fn icon0(g: &mut Gfx) {
 }
 
 fn wordmark(g: &mut Gfx, cx: f32, cy: f32, logo: f32, px: f32) {
-    let tw = g.measure(FontId::Bold, px, "FlashVita");
+    let tw = g.measure(FontId::Bold, px, "RuffleVita");
     let gap = logo * 0.32;
     let total = logo + gap + tw;
     let x = cx - total * 0.5;
     ui::logo(g, Rect::new(x, cy - logo * 0.5, logo, logo));
-    g.text_mid(FontId::Bold, px, x + logo + gap, cy, theme::TEXT, "FlashVita");
+    g.text_mid(FontId::Bold, px, x + logo + gap, cy, theme::TEXT, "RuffleVita");
 }
 
 fn pic0(g: &mut Gfx) {

@@ -167,7 +167,7 @@ dependencies = [
 [[package]]
 name = "build_playerglobal"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "clap",
  "convert_case",
@@ -714,32 +714,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flashvita"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "chrono",
- "encoding_rs",
- "flate2",
- "fontdue",
- "glow",
- "indexmap",
- "png",
- "ron",
- "ruffle_core",
- "ruffle_render",
- "ruffle_render_glow",
- "sdl2",
- "serde",
- "swf",
- "tracing",
- "tracing-subscriber",
- "url",
- "vitasdk-sys",
-]
-
-[[package]]
 name = "flate2"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,7 +808,7 @@ dependencies = [
 [[package]]
 name = "flv-rs"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "bitflags 2.10.0",
  "thiserror",
@@ -1570,7 +1544,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 [[package]]
 name = "pixel_bender"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "byteorder",
  "num-derive",
@@ -1776,7 +1750,6 @@ dependencies = [
 [[package]]
 name = "ruffle_common"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "fnv",
  "gc-arena",
@@ -1787,7 +1760,6 @@ dependencies = [
 [[package]]
 name = "ruffle_core"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "async-channel",
  "bitflags 2.10.0",
@@ -1848,7 +1820,7 @@ dependencies = [
 [[package]]
 name = "ruffle_macros"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1858,7 +1830,7 @@ dependencies = [
 [[package]]
 name = "ruffle_render"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "byteorder",
  "enum-map",
@@ -1896,7 +1868,7 @@ dependencies = [
 [[package]]
 name = "ruffle_video"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "ruffle_render",
  "slotmap",
@@ -1907,7 +1879,33 @@ dependencies = [
 [[package]]
 name = "ruffle_wstr"
 version = "0.1.0"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
+
+[[package]]
+name = "rufflevita"
+version = "1.0.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "chrono",
+ "encoding_rs",
+ "flate2",
+ "fontdue",
+ "glow",
+ "indexmap",
+ "png",
+ "ron",
+ "ruffle_core",
+ "ruffle_render",
+ "ruffle_render_glow",
+ "sdl2",
+ "serde",
+ "swf",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "vitasdk-sys",
+]
 
 [[package]]
 name = "rustc-hash"
@@ -2132,7 +2130,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "swf"
 version = "0.2.2"
-source = "git+https://github.com/ruffle-rs/ruffle?branch=master#563854a8911eda672b1836fb374063162879035d"
+source = "git+https://github.com/ruffle-rs/ruffle?rev=563854a8911eda672b1836fb374063162879035d#563854a8911eda672b1836fb374063162879035d"
 dependencies = [
  "bitflags 2.10.0",
  "bitstream-io",

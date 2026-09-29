@@ -1,12 +1,12 @@
 [package]
-name = "flashvita"
-version = "1.0.0"
+name = "rufflevita"
+version = "1.0.1"
 authors = ["İbrahim Doğan"]
 edition = "2024"
 
 [dependencies]
 sdl2 = { version = "0.38.0", features = ["static-link", "use-pkgconfig"] }
-ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = [
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = [
     "audio",
     "symphonia",
     "mp3",
@@ -16,8 +16,8 @@ ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", 
     "default_compatibility_rules",
     "default_font",
 ] }
-ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", branch = "master" }
-swf = { git = "https://github.com/ruffle-rs/ruffle", branch = "master", features = ["lzma"] }
+ruffle_render = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }
+swf = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = ["lzma"] }
 ruffle_render_glow = { path = "ruffle_render_glow" }
 glow = { git = "https://github.com/grovesNL/glow", branch = "main", features = [] }
 anyhow = "1.0"
@@ -46,13 +46,18 @@ vitasdk-sys = { version = "0.3.2", features = [
 # Single-threaded JPEG decoding on Vita; see patches/jpeg-decoder/src/decoder.rs.
 jpeg-decoder = { path = "patches/jpeg-decoder" }
 
-# Desktop builds can dump screenshots (FLASHVITA_SCRIPT), used for development.
+[patch."https://github.com/ruffle-rs/ruffle"]
+# Ruffle's core with performance fixes; see patches/ruffle/README.md.
+ruffle_core = { path = "patches/ruffle/core" }
+ruffle_common = { path = "patches/ruffle/core/common" }
+
+# Desktop builds can dump screenshots (RUFFLEVITA_SCRIPT), used for development.
 [target.'cfg(not(target_os = "vita"))'.dependencies]
 png = "0.18"
 
 [package.metadata.vita]
-title_id = "FLASHVITA"
-title_name = "FlashVita"
+title_id = "RUFFLEVIT"
+title_name = "RuffleVita"
 assets = "./static/vita"
 build_std = "std,panic_abort"
 

@@ -1,4 +1,4 @@
-//! FlashVita's UI toolkit: theme, shared widgets and animation helpers.
+//! RuffleVita's UI toolkit: theme, shared widgets and animation helpers.
 
 pub mod gfx;
 pub mod icons;
@@ -54,7 +54,7 @@ pub fn background(g: &mut Gfx) {
 /// Author credit, shown in the library and on the LiveArea.
 pub const CREDIT: &str = "by \u{0130}brahim Do\u{011f}an";
 
-/// The FlashVita mark: a blue-to-violet rounded tile with a play symbol.
+/// The RuffleVita mark: a blue-to-violet rounded tile with a play symbol.
 pub fn logo(g: &mut Gfx, r: Rect) {
     let rad = (r.w * 0.28).round();
     g.shadow(r, (r.w * 0.25).max(8.0), theme::ACCENT.alpha(0.35));
@@ -170,10 +170,10 @@ pub fn footer(g: &mut Gfx, hints: &[(Btn, &str)]) -> Vec<(Rect, Btn)> {
     targets
 }
 
-/// "FlashVita 1.0.0 · by İbrahim Doğan" at the left of the footer bar.
+/// "RuffleVita 1.0.0 · by İbrahim Doğan" at the left of the footer bar.
 pub fn footer_credit(g: &mut Gfx) {
     let cy = SCREEN_H as f32 - 22.0;
-    let credit = format!("FlashVita {} \u{00b7} {CREDIT}", env!("CARGO_PKG_VERSION"));
+    let credit = format!("RuffleVita {} \u{00b7} {CREDIT}", env!("CARGO_PKG_VERSION"));
     g.text_mid(FontId::Regular, 13.0, 24.0, cy, theme::FAINT, &credit);
 }
 
