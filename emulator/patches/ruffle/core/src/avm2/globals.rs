@@ -24,7 +24,7 @@ mod function;
 pub mod global_scope;
 mod int;
 mod json;
-mod math;
+pub(crate) mod math;
 mod namespace;
 mod null;
 mod number;

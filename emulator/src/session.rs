@@ -69,6 +69,8 @@ pub struct Session {
     /// stage Ruffle hit-tests the whole display list after every update, so
     /// it is taken off the stage when idle.
     mouse_used: Option<Instant>,
+    /// `frames` when the mouse was last used (timedemo idle check).
+    mouse_used_frame: u64,
     cursor: (f32, f32),
     cursor_shown_until: Instant,
     front_finger: Option<i64>,
@@ -83,6 +85,11 @@ pub struct Session {
     perf_line: String,
     perf_logged: Instant,
     pub started: Instant,
+    /// Game ticks so far; one frame each in timedemo mode.
+    pub frames: u64,
+    /// Timedemo (`RUFFLEVITA_BENCH=<first>-<last>`): every tick runs
+    /// exactly one frame, and the time spent in that range is reported.
+    bench: Option<Bench>,
     pub auto_cover_taken: bool,
     missing: MissingFiles,
 }
@@ -108,7 +115,18 @@ impl Session {
         let storage = DiskStorageBackend::new(platform::saves_dir());
 
         let (scale, force) = scale_mode(profile.scale);
-        let player = PlayerBuilder::new()
+        let builder = PlayerBuilder::new();
+        // Timedemo: load everything up front so the frame count is repeatable.
+        let builder = if std::env::var_os("RUFFLEVITA_BENCH").is_some() {
+            ruffle_core::rv_clock::enable();
+            if std::env::var_os("RUFFLEVITA_PROF").is_some() {
+                ruffle_core::rv_prof::start_sampler(crate::platform::profiler_thread_setup);
+            }
+            builder.with_load_behavior(ruffle_core::LoadBehavior::Blocking)
+        } else {
+            builder
+        };
+        let player = builder
             .with_renderer(renderer)
             .with_audio(audio)
             .with_ui(SdlUiBackend::new(Box::new(window.clone())))
@@ -140,6 +158,7 @@ impl Session {
             stick_keys: [[None; 4]; 2],
             mouse_sources: 0,
             mouse_used: None,
+            mouse_used_frame: 0,
             cursor: (SCREEN_W as f32 * 0.5, SCREEN_H as f32 * 0.5),
             cursor_shown_until: now,
             front_finger: None,
@@ -152,6 +171,8 @@ impl Session {
             perf_line: String::new(),
             perf_logged: now,
             started: now,
+            frames: 0,
+            bench: Bench::from_env(),
             auto_cover_taken: false,
             missing,
         })
@@ -221,6 +242,7 @@ impl Session {
 
     fn mouse_move(&mut self) {
         self.mouse_used = Some(Instant::now());
+        self.mouse_used_frame = self.frames;
         let (x, y) = self.cursor;
         self.send(PlayerEvent::MouseMove { x: x as f64, y: y as f64 });
     }
@@ -246,6 +268,7 @@ impl Session {
         }
         self.mouse_sources &= !source;
         self.mouse_used = Some(Instant::now());
+        self.mouse_used_frame = self.frames;
         if self.mouse_sources == 0 {
             let (x, y) = self.cursor;
             self.send(PlayerEvent::MouseUp { x: x as f64, y: y as f64, button: MouseButton::Left });
@@ -422,8 +445,13 @@ impl Session {
     }
 
     fn flush_events(&mut self) {
-        let mouse_active =
-            self.mouse_sources != 0 || self.mouse_used.is_some_and(|t| t.elapsed() < MOUSE_IDLE);
+        // Timedemo: idle by game frames (5 s at 30 fps), not wall time, so
+        // the run is the same however fast it goes.
+        let recent = match self.bench {
+            Some(_) => self.mouse_used.is_some() && self.frames.saturating_sub(self.mouse_used_frame) < 150,
+            None => self.mouse_used.is_some_and(|t| t.elapsed() < MOUSE_IDLE),
+        };
+        let mouse_active = self.mouse_sources != 0 || recent;
         let mut player = self.player.lock().unwrap();
         // Set before handling events so the first click after idling still hits.
         player.set_mouse_in_stage(mouse_active);
@@ -450,14 +478,35 @@ impl Session {
 
     /// Delivers input and advances the movie by the real time elapsed.
     pub fn tick(&mut self) {
-        self.flush_events();
+        let _zone = ruffle_core::rv_prof::zone(ruffle_core::rv_prof::Zone::Tick);
+        {
+            let _zone = ruffle_core::rv_prof::zone(ruffle_core::rv_prof::Zone::Input);
+            self.flush_events();
+        }
         let now = Instant::now();
         // Clamp long gaps (loading, suspend) so the game doesn't fast-forward.
         let dt = (now - self.last_tick).as_secs_f64().min(0.1) * 1000.0;
         self.last_tick = now;
-        self.executor.run();
-        self.player.lock().unwrap().tick(dt);
-        self.perf.tick += now.elapsed();
+        {
+            let _zone = ruffle_core::rv_prof::zone(ruffle_core::rv_prof::Zone::Executor);
+            self.executor.run();
+        }
+        let instr_before = if self.bench.is_some() { instructions_retired() } else { 0 };
+        let mut player = self.player.lock().unwrap();
+        let dt = if self.bench.is_some() { 1000.0 / player.frame_rate() } else { dt };
+        player.tick(dt);
+        drop(player);
+        let spent = now.elapsed();
+        self.perf.tick += spent;
+        self.frames += 1;
+        if let Some(b) = &mut self.bench {
+            b.add_tick(self.frames, spent, instructions_retired().saturating_sub(instr_before));
+        }
+    }
+
+    /// Timedemo mode: run as fast as possible instead of pacing frames.
+    pub fn benchmarking(&self) -> bool {
+        self.bench.is_some()
     }
 
     pub fn needs_render(&self) -> bool {
@@ -471,7 +520,13 @@ impl Session {
     pub fn render(&mut self) {
         let start = Instant::now();
         self.player.lock().unwrap().render();
-        self.perf.render += start.elapsed();
+        let spent = start.elapsed();
+        self.perf.render += spent;
+        let draws = ruffle_render_glow::take_draw_calls();
+        self.perf.draws += draws;
+        if let Some(b) = &mut self.bench {
+            b.add_render(self.frames, spent, draws);
+        }
         if !self.running {
             return;
         }
@@ -495,7 +550,7 @@ impl Session {
         let frames = self.fps_frames.max(1) as f32;
         let ms = |d: Duration| d.as_secs_f32() * 1000.0 / frames;
         let p = std::mem::take(&mut self.perf);
-        let draws = ruffle_render_glow::take_draw_calls() as f32 / frames;
+        let draws = p.draws as f32 / frames;
         self.perf_line = format!(
             "tick {:.1} \u{b7} render {:.1} \u{b7} present {:.1} ms \u{b7} {draws:.0} draws",
             ms(p.tick),
@@ -506,6 +561,8 @@ impl Session {
             self.perf_logged = Instant::now();
             let mem = crate::platform::memory_summary().unwrap_or_default();
             tracing::info!("{}: {:.1} FPS \u{b7} {} \u{b7} {mem}", self.key, self.fps, self.perf_line);
+            #[cfg(feature = "opstats")]
+            tracing::info!("{}", ruffle_core::opstats::report(30));
         }
     }
 
@@ -610,4 +667,101 @@ struct PerfTotals {
     tick: Duration,
     render: Duration,
     present: Duration,
+    draws: u32,
+}
+
+/// Timedemo totals over a fixed range of frames.
+struct Bench {
+    first: u64,
+    last: u64,
+    tick: Duration,
+    render: Duration,
+    draws: u64,
+    worst_tick: Duration,
+    /// Instructions retired during ticks (main thread, macOS only).
+    instructions: u64,
+}
+
+impl Bench {
+    fn from_env() -> Option<Bench> {
+        let spec = std::env::var("RUFFLEVITA_BENCH").ok()?;
+        let (a, b) = spec.split_once('-')?;
+        Some(Bench {
+            first: a.trim().parse().ok()?,
+            last: b.trim().parse().ok()?,
+            tick: Duration::ZERO,
+            render: Duration::ZERO,
+            draws: 0,
+            worst_tick: Duration::ZERO,
+            instructions: 0,
+        })
+    }
+
+    fn in_range(&self, frame: u64) -> bool {
+        frame >= self.first && frame <= self.last
+    }
+
+    fn add_tick(&mut self, frame: u64, spent: Duration, instructions: u64) {
+        if frame == self.first {
+            ruffle_core::rv_prof::set_active(true);
+            for s in &ruffle_render_glow::RENDER_STATS {
+                s.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if self.in_range(frame) {
+            self.tick += spent;
+            self.instructions += instructions;
+            self.worst_tick = self.worst_tick.max(spent);
+        }
+        if frame == self.last {
+            let n = (self.last - self.first + 1) as f64;
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            tracing::info!(
+                "BENCH frames {}-{}: tick {:.3} ms/frame (worst {:.1}) \u{b7} {:.2} M instr/frame \u{b7} render {:.3} ms/frame \u{b7} {:.1} draws/frame",
+                self.first,
+                self.last,
+                ms(self.tick) / n,
+                ms(self.worst_tick),
+                self.instructions as f64 / n / 1e6,
+                ms(self.render) / n,
+                self.draws as f64 / n,
+            );
+            let stats: Vec<String> = ruffle_render_glow::RENDER_STATS
+                .iter()
+                .zip(ruffle_render_glow::RENDER_STAT_NAMES)
+                .map(|(s, name)| format!("{name} {:.1}", s.load(std::sync::atomic::Ordering::Relaxed) as f64 / n))
+                .collect();
+            tracing::info!("BENCH render per frame: {}", stats.join(" \u{b7} "));
+            ruffle_core::rv_prof::set_active(false);
+            if ruffle_core::rv_prof::is_enabled() {
+                for line in ruffle_core::rv_prof::report(30).lines() {
+                    tracing::info!("{line}");
+                }
+            }
+        }
+    }
+
+    fn add_render(&mut self, frame: u64, spent: Duration, draws: u32) {
+        if self.in_range(frame) {
+            self.render += spent;
+            self.draws += draws as u64;
+        }
+    }
+}
+
+/// Instructions retired by the calling thread so far (macOS), for timedemos:
+/// a steadier stand-in for the Vita's CPU than wall time on a desktop.
+fn instructions_retired() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
+        }
+        // THSC_CPI: instructions, cycles.
+        let mut counts = [0u64; 2];
+        if unsafe { thread_selfcounts(1, counts.as_mut_ptr(), 16) } == 0 {
+            return counts[0];
+        }
+    }
+    0
 }

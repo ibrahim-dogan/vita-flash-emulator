@@ -314,18 +314,15 @@ impl Input {
         }));
     }
 
-    /// Synthesises a press for scripted desktop runs.
-    #[cfg(not(target_os = "vita"))]
+    /// Synthesises a press for scripted runs (`RUFFLEVITA_SCRIPT`).
     pub fn inject(&mut self, b: Btn, down: bool) {
         self.set_button(b, down);
     }
 
-    #[cfg(not(target_os = "vita"))]
     pub fn inject_event(&mut self, ev: InputEvent) {
         self.events.push(ev);
     }
 
-    #[cfg(not(target_os = "vita"))]
     pub fn inject_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
         self.events.push(InputEvent::Touch(Touch { phase, panel: Panel::Front, finger: 0, x, y }));
     }

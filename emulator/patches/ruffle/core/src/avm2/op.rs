@@ -335,6 +335,63 @@ pub enum Op<'gc> {
     TypeOf,
     Timestamp,
     URShift,
+
+    // RuffleVita superinstructions, made by `peephole::fuse_superinstructions`
+    // as the very last pass. Each one does exactly what the pair of ops it
+    // replaces did, in one dispatch.
+    /// GetLocal + GetSlot (`local.field`).
+    GetLocalSlot {
+        index: u32,
+        slot: u32,
+    },
+    /// GetLocal + GetLocal.
+    GetLocal2 {
+        first: u32,
+        second: u32,
+    },
+    /// SetLocal + GetLocal (different registers).
+    SetLocalGetLocal {
+        set: u32,
+        get: u32,
+    },
+    /// Comparison + IfTrue/IfFalse. `Not*` jumps when the comparison is
+    /// false, like the IfFalse form (NaN included).
+    IfLt {
+        offset: usize,
+    },
+    IfNotLt {
+        offset: usize,
+    },
+    IfLe {
+        offset: usize,
+    },
+    IfNotLe {
+        offset: usize,
+    },
+    IfGt {
+        offset: usize,
+    },
+    IfNotGt {
+        offset: usize,
+    },
+    IfGe {
+        offset: usize,
+    },
+    IfNotGe {
+        offset: usize,
+    },
+    IfEq {
+        offset: usize,
+    },
+    IfNotEq {
+        offset: usize,
+    },
+    IfStrictEq {
+        offset: usize,
+    },
+    IfNotStrictEq {
+        offset: usize,
+    },
 }
 
 impl Op<'_> {
@@ -377,7 +434,35 @@ impl Op<'_> {
                 | Op::Timestamp
                 | Op::TypeOf
                 | Op::ReturnVoid { .. }
+                | Op::GetLocal2 { .. }
+                | Op::SetLocalGetLocal { .. }
+                | Op::IfStrictEq { .. }
+                | Op::IfNotStrictEq { .. }
         )
+    }
+
+    /// The branch target of a conditional or unconditional jump (not
+    /// LookupSwitch), so passes that rewrite offsets can handle every branch.
+    pub fn branch_offset_mut(&mut self) -> Option<&mut usize> {
+        match self {
+            Op::IfTrue { offset }
+            | Op::IfFalse { offset }
+            | Op::Jump { offset }
+            | Op::PopJump { offset }
+            | Op::IfLt { offset }
+            | Op::IfNotLt { offset }
+            | Op::IfLe { offset }
+            | Op::IfNotLe { offset }
+            | Op::IfGt { offset }
+            | Op::IfNotGt { offset }
+            | Op::IfGe { offset }
+            | Op::IfNotGe { offset }
+            | Op::IfEq { offset }
+            | Op::IfNotEq { offset }
+            | Op::IfStrictEq { offset }
+            | Op::IfNotStrictEq { offset } => Some(offset),
+            _ => None,
+        }
     }
 
     pub fn is_nop(&self) -> bool {

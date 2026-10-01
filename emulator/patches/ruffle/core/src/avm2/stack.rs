@@ -47,6 +47,7 @@ impl<'gc> Stack<'gc> {
     /// Returns a slice of stack data for the specified method, starting at the
     /// current stack pointer. Stack frames obtained from this method must be
     /// properly disposed of by using the `dispose_stack_frame` method.
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     pub fn get_stack_frame(&self, method: Method<'gc>) -> StackFrame<'_, 'gc> {
         // First calculate the frame size
         let body = method
@@ -65,13 +66,18 @@ impl<'gc> Stack<'gc> {
         // Ensure the StackFrame returned to the caller does not have any
         // old values on it, as these may contain Gc pointers that have already
         // been collected.
-        for value in subslice {
+        //
+        // RuffleVita: only the locals need it. Verified code never reads an
+        // operand stack slot before pushing to it, and the GC never looks at
+        // the stack (see `trace` below), so stale operand slots are harmless.
+        for value in &subslice[..(body.num_locals as usize).min(frame_size)] {
             value.set(Value::Undefined);
         }
 
         StackFrame::for_data(subslice)
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     pub fn dispose_stack_frame(self, stack_frame: StackFrame<'_, 'gc>) {
         self.0
             .stack_pointer
@@ -124,6 +130,16 @@ impl<'a, 'gc> StackFrame<'a, 'gc> {
         self.stack_pointer.set(self.stack_pointer.get() - 1);
 
         self.data[self.stack_pointer.get()].get()
+    }
+
+    /// RuffleVita: pops the top two values as `(below, top)`, with one stack
+    /// pointer update.
+    #[inline(always)]
+    pub fn pop2(&self) -> (Value<'gc>, Value<'gc>) {
+        let sp = self.stack_pointer.get() - 2;
+        self.stack_pointer.set(sp);
+        let pair = &self.data[sp..sp + 2];
+        (pair[0].get(), pair[1].get())
     }
 
     /// Peek the n-th value from the end of the operand stack.

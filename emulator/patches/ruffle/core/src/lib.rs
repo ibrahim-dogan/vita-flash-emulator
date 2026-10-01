@@ -1,5 +1,7 @@
 // This lint is helpful, but right now we have too many instances of it.
 // TODO: Remove this once all instances are fixed.
+#![cfg_attr(feature = "rv_prof_ops", feature(core_intrinsics))]
+#![cfg_attr(feature = "rv_prof_ops", allow(internal_features))]
 #![allow(clippy::needless_pass_by_ref_mut)]
 // This lint is good in theory, but in AVMs we often need to do `let x = args.get(0); let y = args.get(1);` etc.
 // It'd make those much less readable and consistent.
@@ -15,6 +17,20 @@ extern crate num_derive;
 #[macro_use]
 mod avm1;
 mod avm2;
+pub mod rv_clock;
+pub use rv_prof;
+
+/// RuffleVita: an `rv_prof` zone that only exists in profiling builds
+/// (`rv_prof_ops`), for hot paths where even a few stores matter.
+macro_rules! rv_deep_zone {
+    ($zone:ident) => {
+        #[cfg(feature = "rv_prof_ops")]
+        let _rv_zone = crate::rv_prof::zone(crate::rv_prof::Zone::$zone);
+    };
+}
+pub(crate) use rv_deep_zone;
+#[cfg(feature = "rv_opstats")]
+pub use avm2::opstats;
 mod avm_rng;
 mod binary_data;
 pub mod bitmap;

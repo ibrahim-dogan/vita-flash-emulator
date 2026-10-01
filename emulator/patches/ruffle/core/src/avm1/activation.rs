@@ -2,7 +2,7 @@ use crate::avm1::callable_value::CallableValue;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Avm1Function, ExecutionReason, FunctionObject};
 use crate::avm1::property::Attribute;
-use crate::avm1::runtime::skip_actions;
+use crate::avm1::runtime::{skip_actions, DecodedAction, DecodedActions};
 use crate::avm1::scope::{Scope, ScopeClass};
 use crate::avm1::{fscommand, globals, scope, ArrayBuilder, Object, Value};
 use crate::backend::navigator::{NavigationMethod, Request};
@@ -410,7 +410,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     pub fn run_actions(&mut self, code: SwfSlice) -> Result<ReturnType<'gc>, Error<'gc>> {
-        let mut read = Reader::new(&code.movie.data()[code.start..], self.swf_version());
+        let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Avm1Code);
+        // RuffleVita: run from the decoded action cache; the byte reader
+        // below only takes over where the cache can't (see CachedFlow).
+        let decoded = {
+            crate::rv_deep_zone!(Avm1Decode);
+            let swf_version = self.swf_version();
+            self.context.avm1.action_cache_mut().get(&code, swf_version)
+        };
+        let resume_at = match self.run_cached_actions(&code, &decoded)? {
+            CachedFlow::Return(return_type) => return Ok(return_type),
+            CachedFlow::Resume(at) => at,
+        };
+        let data = code.movie.data();
+        let mut read = Reader::new(&data[resume_at.min(data.len())..], self.swf_version());
 
         loop {
             let result = self.do_action(&code, &mut read);
@@ -418,6 +431,78 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Ok(FrameControl::Return(return_type)) => break Ok(return_type),
                 Ok(FrameControl::Continue) => {}
                 Err(e) => break Err(e),
+            }
+        }
+    }
+
+    /// RuffleVita: runs `code` from its decoded actions (`ActionCache`).
+    /// Hands over to the byte reader, at an absolute position in the movie,
+    /// for what the list can't represent: a jump into the middle of an
+    /// action or out of the code, `WaitForFrame` skips, and actions that
+    /// failed to decode (so the reader reports the error as it always has).
+    fn run_cached_actions(
+        &mut self,
+        code: &SwfSlice,
+        decoded: &DecodedActions,
+    ) -> Result<CachedFlow<'gc>, Error<'gc>> {
+        let data = code.movie.data();
+        let mut no_reader = Reader::new(&data[..0], self.swf_version());
+        let jump_target = |action: &DecodedAction, offset: i16| -> (usize, Option<usize>) {
+            // `Reader::seek`: relative to the end of the jump, clamped to the data.
+            let target = (code.start + action.end as usize) as isize + offset as isize;
+            let target = if target < 0 { data.len() } else { (target as usize).min(data.len()) };
+            let index = decoded.index_of(target as isize - code.start as isize);
+            (target, index)
+        };
+        let mut i = 0;
+        loop {
+            *self.context.actions_since_timeout_check += 1;
+            if *self.context.actions_since_timeout_check >= 2000 {
+                *self.context.actions_since_timeout_check = 0;
+                if self.context.update_start.elapsed() >= self.context.max_execution_duration {
+                    return Err(Error::ExecutionTimeout);
+                }
+            }
+
+            let Some(action) = decoded.actions.get(i) else {
+                // Past the last action: the end of the code (an implicit
+                // return), or where decoding stopped.
+                return Ok(match decoded.stopped_at {
+                    Some(pos) => CachedFlow::Resume(code.start + pos),
+                    None => CachedFlow::Return(ReturnType::Implicit),
+                });
+            };
+            crate::rv_prof::avm1_op(action.code);
+            i += 1;
+
+            let control = match &action.action {
+                Action::Push(push) => self.action_push(push),
+                Action::ConstantPool(pool) => self.action_constant_pool(pool),
+                Action::Jump(jump) => match jump_target(action, jump.offset) {
+                    (_, Some(index)) => {
+                        i = index;
+                        continue;
+                    }
+                    (target, None) => return Ok(CachedFlow::Resume(target)),
+                },
+                Action::If(branch) => {
+                    let condition = self.context.avm1.pop();
+                    if condition.as_bool(self.swf_version()) {
+                        match jump_target(action, branch.offset) {
+                            (_, Some(index)) => i = index,
+                            (target, None) => return Ok(CachedFlow::Resume(target)),
+                        }
+                    }
+                    continue;
+                }
+                Action::WaitForFrame(_) | Action::WaitForFrame2(_) => {
+                    return Ok(CachedFlow::Resume(code.start + action.pos as usize));
+                }
+                other => self.execute_action(other.clone(), code, &mut no_reader),
+            };
+            match control? {
+                FrameControl::Continue => {}
+                FrameControl::Return(return_type) => return Ok(CachedFlow::Return(return_type)),
             }
         }
     }
@@ -440,13 +525,30 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             //Executing beyond the end of a function constitutes an implicit return.
             Ok(FrameControl::Return(ReturnType::Implicit))
         } else {
-            let action = reader.read_action()?;
+            crate::rv_prof::avm1_op(reader.get_ref().first().copied().unwrap_or(0));
+            let action = {
+                crate::rv_deep_zone!(Avm1Decode);
+                reader.read_action()?
+            };
             avm_debug!(
                 self.context.avm1,
                 "({}) Action: {action:?}",
                 self.id.depth(),
             );
 
+            self.execute_action(action, data, reader)
+        }
+    }
+
+    /// Runs one decoded action; shared by the byte reader loop (`do_action`)
+    /// and the cached loop (`run_cached_actions`).
+    fn execute_action<'b>(
+        &mut self,
+        action: Action<'b>,
+        data: &'b SwfSlice,
+        reader: &mut Reader<'b>,
+    ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        {
             match action {
                 Action::Add => self.action_add(),
                 Action::Add2 => self.action_add_2(),
@@ -464,7 +566,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Action::CastOp => self.action_cast_op(),
                 Action::CharToAscii => self.action_char_to_ascii(),
                 Action::CloneSprite => self.action_clone_sprite(),
-                Action::ConstantPool(action) => self.action_constant_pool(action),
+                Action::ConstantPool(action) => self.action_constant_pool(&action),
                 Action::Decrement => self.action_decrement(),
                 Action::DefineFunction(action) => self.action_define_function(action.into(), data),
                 Action::DefineFunction2(action) => self.action_define_function(action, data),
@@ -513,7 +615,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Action::Play => self.action_play(),
                 Action::Pop => self.action_pop(),
                 Action::PreviousFrame => self.action_prev_frame(),
-                Action::Push(action) => self.action_push(action),
+                Action::Push(action) => self.action_push(&action),
                 Action::PushDuplicate => self.action_push_duplicate(),
                 Action::RandomNumber => self.action_random_number(),
                 Action::RemoveSprite => self.action_remove_sprite(),
@@ -848,18 +950,28 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn action_constant_pool(
         &mut self,
-        action: ConstantPool,
+        action: &ConstantPool,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
         let encoding = self.encoding();
-        let constants = action
-            .strings
-            .iter()
-            .map(|s| self.strings().intern_wstr(s.decode(encoding)).into())
-            .collect();
+        // RuffleVita: reuse the pool decoded the last time this action ran.
+        let pool = match self.context.avm1.constant_pool_cache().get(&action.strings, encoding) {
+            Some(pool) => pool,
+            None => {
+                let constants = action
+                    .strings
+                    .iter()
+                    .map(|s| self.strings().intern_wstr(s.decode(encoding)).into())
+                    .collect();
+                let pool = Gc::new(self.gc(), constants);
+                self.context
+                    .avm1
+                    .constant_pool_cache_mut()
+                    .insert(&action.strings, encoding, pool);
+                pool
+            }
+        };
 
-        self.context
-            .avm1
-            .set_constant_pool(Gc::new(self.gc(), constants));
+        self.context.avm1.set_constant_pool(pool);
         self.set_constant_pool(self.context.avm1.constant_pool());
 
         Ok(FrameControl::Continue)
@@ -1153,9 +1265,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             *self.context.time_offset += 1;
         }
 
-        let time = Instant::now()
-            .duration_since(self.context.start_time)
-            .as_millis() as u32;
+        let time = crate::rv_clock::now_ms().unwrap_or_else(|| {
+            Instant::now()
+                .duration_since(self.context.start_time)
+                .as_millis() as u32
+        });
         let result = time.wrapping_add(*self.context.time_offset);
         self.context.avm1.push(result.into());
         Ok(FrameControl::Continue)
@@ -1787,10 +1901,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(FrameControl::Continue)
     }
 
-    fn action_push(&mut self, action: Push) -> Result<FrameControl<'gc>, Error<'gc>> {
-        for value in action.values {
+    fn action_push(&mut self, action: &Push) -> Result<FrameControl<'gc>, Error<'gc>> {
+        for value in &action.values {
             use swf::avm1::types::Value as SwfValue;
-            let value = match value {
+            let value = match *value {
                 SwfValue::Undefined => Value::Undefined,
                 SwfValue::Null => Value::Null,
                 SwfValue::Bool(v) => v.into(),
@@ -2941,6 +3055,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Because scopes are object chains, the same rules for `Object::get`
     /// still apply here.
     pub fn resolve(&mut self, name: AvmString<'gc>) -> Result<CallableValue<'gc>, Error<'gc>> {
+        crate::rv_deep_zone!(Avm1Resolve);
         let this_case_sensitive = if self.swf_version() <= 5 {
             self.scope().class() == ScopeClass::Local
         } else {
@@ -3123,4 +3238,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.set_scope(Scope::new_target_scope(self.scope(), clip_obj, self.gc()));
         Ok(FrameControl::Continue)
     }
+}
+
+/// RuffleVita: how `Activation::run_cached_actions` ended.
+enum CachedFlow<'gc> {
+    Return(ReturnType<'gc>),
+    /// Continue with the byte reader at this position in the movie data.
+    Resume(usize),
 }

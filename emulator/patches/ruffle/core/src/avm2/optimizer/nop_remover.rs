@@ -25,13 +25,11 @@ pub fn remove_nops<'gc>(code: &mut Vec<Op<'gc>>, exceptions: &mut [Exception<'gc
 
     // Rewrite jump offsets
     for op in code {
+        if let Some(offset) = op.branch_offset_mut() {
+            *offset = offset_vec[*offset];
+            continue;
+        }
         match op {
-            Op::IfTrue { offset }
-            | Op::IfFalse { offset }
-            | Op::Jump { offset }
-            | Op::PopJump { offset } => {
-                *offset = offset_vec[*offset];
-            }
             Op::LookupSwitch(lookup_switch) => {
                 for target in lookup_switch
                     .case_offsets

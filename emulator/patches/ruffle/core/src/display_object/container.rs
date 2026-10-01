@@ -175,6 +175,7 @@ pub trait TDisplayObjectContainer<'gc>:
     /// this mechanism.
     #[no_dynamic]
     fn child_by_name(self, name: &WStr, case_sensitive: bool) -> Option<DisplayObject<'gc>> {
+        crate::rv_deep_zone!(Avm1ChildByName);
         self.raw_container().get_name(name, case_sensitive)
     }
 

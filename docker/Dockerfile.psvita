@@ -41,10 +41,11 @@ RUN git clone --depth=1 https://github.com/Rinnegatamante/vitaGL /opt/vitaGL && 
 # --- RuffleVita --------------------------------------------------------------
 COPY emulator /opt/rufflevita
 WORKDIR /opt/rufflevita
+ARG RUFFLEVITA_FEATURES=""
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/opt/rufflevita/target \
-    ./build_psp2.sh && \
+    RUFFLEVITA_FEATURES="$RUFFLEVITA_FEATURES" ./build_psp2.sh && \
     mkdir -p /out && \
     cp target/armv7-sony-vita-newlibeabihf/vita/rufflevita.vpk /out/ && \
     cp target/armv7-sony-vita-newlibeabihf/vita/rufflevita.self /out/

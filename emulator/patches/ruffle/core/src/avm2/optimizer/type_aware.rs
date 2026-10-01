@@ -2150,7 +2150,22 @@ fn abstract_interpret_ops<'gc>(
             | Op::ConstructSlot { .. }
             | Op::GetScriptGlobals { .. }
             | Op::PopJump { .. }
-            | Op::SetSlotNoCoerce { .. } => unreachable!("Custom ops should not be encountered"),
+            | Op::SetSlotNoCoerce { .. }
+            | Op::GetLocalSlot { .. }
+            | Op::GetLocal2 { .. }
+            | Op::SetLocalGetLocal { .. }
+            | Op::IfLt { .. }
+            | Op::IfNotLt { .. }
+            | Op::IfLe { .. }
+            | Op::IfNotLe { .. }
+            | Op::IfGt { .. }
+            | Op::IfNotGt { .. }
+            | Op::IfGe { .. }
+            | Op::IfNotGe { .. }
+            | Op::IfEq { .. }
+            | Op::IfNotEq { .. }
+            | Op::IfStrictEq { .. }
+            | Op::IfNotStrictEq { .. } => unreachable!("Custom ops should not be encountered"),
         }
     }
 

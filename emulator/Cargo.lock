@@ -1800,6 +1800,7 @@ dependencies = [
  "ruffle_render",
  "ruffle_video",
  "ruffle_wstr",
+ "rv_prof",
  "scopeguard",
  "serde",
  "serde_json",
@@ -1861,6 +1862,7 @@ dependencies = [
  "image",
  "log",
  "ruffle_render",
+ "rv_prof",
  "swf",
  "thiserror",
 ]
@@ -1942,6 +1944,10 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "rv_prof"
+version = "0.1.0"
 
 [[package]]
 name = "ryu"

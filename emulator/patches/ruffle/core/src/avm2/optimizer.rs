@@ -47,6 +47,8 @@ pub fn optimize<'gc>(
 
     dce::eliminate_dead_code(code_slice, &jump_targets);
 
+    peephole::fuse_superinstructions(code_slice, &jump_targets, method_exceptions);
+
     nop_remover::remove_nops(code, method_exceptions);
 
     Ok(())

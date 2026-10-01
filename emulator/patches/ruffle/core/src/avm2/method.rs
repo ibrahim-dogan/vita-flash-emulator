@@ -136,6 +136,15 @@ struct MethodData<'gc> {
     /// This is true when the method is a free-standing function and none of the
     /// declared arguments have a type or a default value.
     is_unchecked: bool,
+
+    /// RuffleVita: this method's id for `rv_prof`, given on first use.
+    #[collect(require_static)]
+    prof_id: std::cell::Cell<u16>,
+
+    /// RuffleVita: whether there's AOT-compiled code for this method:
+    /// 0 = not looked up yet, 1 = none, n = `aot::generated::TABLE[n - 2]`.
+    #[collect(require_static)]
+    aot_slot: std::cell::Cell<u16>,
 }
 
 impl PartialEq for Method<'_> {
@@ -224,8 +233,36 @@ impl<'gc> Method<'gc> {
                 association: OnceLock::new(),
                 is_function,
                 is_unchecked: is_function && all_params_unchecked,
+                prof_id: std::cell::Cell::new(0),
+                aot_slot: std::cell::Cell::new(0),
             },
         )))
+    }
+
+    /// RuffleVita: see `aot::lookup`.
+    #[inline(always)]
+    pub fn aot_slot(self) -> u16 {
+        self.0.aot_slot.get()
+    }
+
+    pub fn set_aot_slot(self, slot: u16) {
+        self.0.aot_slot.set(slot);
+    }
+
+    /// RuffleVita: an id for `rv_prof` (0 when not profiling).
+    #[inline(always)]
+    pub fn prof_id(self) -> u16 {
+        let id = self.0.prof_id.get();
+        if id != 0 || !crate::rv_prof::is_enabled() {
+            return id;
+        }
+        let id = crate::rv_prof::register_function((Gc::as_ptr(self.0) as usize, usize::MAX), || {
+            let mut name = crate::string::WString::new();
+            crate::avm2::function::display_function(&mut name, self);
+            name.to_utf8_lossy().into_owned()
+        });
+        self.0.prof_id.set(id);
+        id
     }
 
     /// Get the underlying ABC file.
@@ -270,6 +307,8 @@ impl<'gc> Method<'gc> {
         match &self.0.method_kind {
             MethodKind::Bytecode { verified_info } if verified_info.get().is_none() => {
                 let info = crate::avm2::verify::verify_method(activation, self)?;
+                crate::avm2::aot_dump::after_verify(self, &info.parsed_code);
+                crate::avm2::aot::translate::after_verify(self, &info.parsed_code, !info.exceptions.is_empty());
 
                 Gc::write(activation.gc(), self.0);
 
@@ -304,11 +343,16 @@ impl<'gc> Method<'gc> {
     }
 
     /// Resolve the classes used in this method's signature and return type.
-    #[inline(never)]
+    #[inline(always)]
     pub fn resolve_info(self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
         if self.0.resolved_info.get().is_some() {
             return Ok(());
         }
+        self.resolve_info_slow(activation)
+    }
+
+    #[inline(never)]
+    fn resolve_info_slow(self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
 
         let param_config = resolve_param_config(activation, self.signature())?;
         let return_type = resolve_return_type(activation, self.return_type())?;

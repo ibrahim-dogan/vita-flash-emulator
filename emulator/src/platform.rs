@@ -139,6 +139,54 @@ pub fn init_hardware() {
     }
 }
 
+/// Development automation: `autorun.txt` in the data folder holds
+/// `KEY=VALUE` lines (`RUFFLEVITA_AUTOSTART`, `RUFFLEVITA_SCRIPT`,
+/// `RUFFLEVITA_BENCH`, ...) that are set as environment variables at startup,
+/// which is how the Vita gets them. The file is used once: it's renamed to
+/// `autorun.last`, so the next normal launch is a normal launch. Returns the
+/// keys that were set, for the log.
+pub fn apply_autorun() -> Vec<String> {
+    let path = data_dir().join("autorun.txt");
+    let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let _ = std::fs::rename(&path, data_dir().join("autorun.last"));
+    let mut keys = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        if let Some((key, value)) = line.split_once('=') {
+            // SAFETY: called first thing in `run`, before any other thread exists.
+            unsafe { std::env::set_var(key.trim(), value.trim()) };
+            keys.push(key.trim().to_owned());
+        }
+    }
+    keys
+}
+
+/// Asks macOS to keep the main thread on the performance cores even though
+/// the app has no visible window (otherwise it counts as background work).
+#[cfg(not(target_os = "vita"))]
+pub fn keep_foreground_priority() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        unsafe extern "C" {
+            fn pthread_set_qos_class_self_np(qos: u32, relative_priority: i32) -> i32;
+        }
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+/// Runs on `rv_prof`'s sampling thread: the main thread is pinned to core 1
+/// at high priority, so the sampler needs another core and a priority that
+/// lets it wake up on time.
+pub fn profiler_thread_setup() {
+    #[cfg(target_os = "vita")]
+    unsafe {
+        use vitasdk_sys::*;
+        let id = sceKernelGetThreadId();
+        sceKernelChangeThreadPriority(id, SCE_KERNEL_PROCESS_PRIORITY_USER_HIGH as _);
+        sceKernelChangeThreadCpuAffinityMask(id, SCE_KERNEL_CPU_MASK_USER_0 as _);
+    }
+}
+
 /// Battery charge in percent and whether it is charging, if the device has one.
 pub fn battery() -> Option<(u8, bool)> {
     #[cfg(target_os = "vita")]

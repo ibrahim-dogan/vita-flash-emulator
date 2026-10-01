@@ -58,6 +58,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
 
     /// Gets the value for the specified property.
     pub fn get<T: PropertyKey>(&self, key: T, case_sensitive: bool) -> Option<&V> {
+        crate::rv_deep_zone!(Avm1PropMap);
         if case_sensitive {
             self.0.get(&CaseSensitive::new(&key))
         } else {
