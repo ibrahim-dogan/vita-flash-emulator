@@ -20,6 +20,9 @@ pub fn get_timer<'gc>(
     _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(ms) = crate::rv_clock::now_ms() {
+        return Ok(ms.into());
+    }
     Ok((Instant::now()
         .duration_since(activation.context.start_time)
         .as_millis() as u32)

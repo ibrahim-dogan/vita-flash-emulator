@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 DOCKER_BUILDKIT=1 docker build \
     -f docker/Dockerfile.psvita \
+    --build-arg RUFFLEVITA_FEATURES="${RUFFLEVITA_FEATURES:-}" \
     -t rufflevita:psvita \
     .
 

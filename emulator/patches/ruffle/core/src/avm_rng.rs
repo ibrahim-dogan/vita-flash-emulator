@@ -62,5 +62,8 @@ impl AvmRng {
 
 // https://github.com/adobe-flash/avmplus/blob/65a05927767f3735db37823eebf7d743531f5d37/VMPI/PosixSpecificUtils.cpp#L18
 fn get_seed() -> u32 {
+    if crate::rv_clock::is_enabled() {
+        return 0x5EED;
+    }
     get_current_date_time().timestamp_micros() as u32
 }

@@ -3,6 +3,11 @@
 /// Converts an `f64` to a `u8` with ECMAScript `ToUInt8` wrapping behavior.
 /// The value will be wrapped modulo 2^8.
 pub fn f64_to_wrapping_u8(n: f64) -> u8 {
+    // RuffleVita: `rem_euclid` is a libm fmod call on 32-bit ARM; skip it
+    // for the values that are already in range, which is nearly all of them.
+    if n > -1.0 && n < 256.0 {
+        return n as u8;
+    }
     if !n.is_finite() {
         0
     } else {
@@ -13,6 +18,9 @@ pub fn f64_to_wrapping_u8(n: f64) -> u8 {
 /// Converts an `f64` to a `u16` with ECMAScript `ToUInt16` wrapping behavior.
 /// The value will be wrapped modulo 2^16.
 pub fn f64_to_wrapping_u16(n: f64) -> u16 {
+    if n > -1.0 && n < 65536.0 {
+        return n as u16;
+    }
     if !n.is_finite() {
         0
     } else {
@@ -30,6 +38,10 @@ pub fn f64_to_wrapping_i16(n: f64) -> i16 {
 /// The value will be wrapped modulo 2^32.
 #[expect(clippy::unreadable_literal)]
 pub fn f64_to_wrapping_u32(n: f64) -> u32 {
+    // RuffleVita: see f64_to_wrapping_u8.
+    if n > -1.0 && n < 4294967296.0 {
+        return n as u32;
+    }
     if !n.is_finite() {
         0
     } else {
@@ -56,6 +68,10 @@ pub fn f64_to_wrapping_i32(n: f64) -> i32 {
 
 #[allow(unused)]
 fn f64_to_wrapping_i32_generic(n: f64) -> i32 {
+    // RuffleVita: one VCVT for everything in range (NaN fails the test).
+    if n > -2147483649.0 && n < 2147483648.0 {
+        return n as i32;
+    }
     f64_to_wrapping_u32(n) as i32
 }
 

@@ -61,7 +61,11 @@ mod multiname;
 mod namespace;
 pub mod object;
 mod op;
+mod aot;
+mod aot_dump;
 mod optimizer;
+#[cfg(feature = "rv_opstats")]
+pub mod opstats;
 mod parameters;
 pub mod property;
 mod property_map;
@@ -660,11 +664,15 @@ impl<'gc> Avm2<'gc> {
     }
 
     /// Pushes an executable on the call stack
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    #[cfg_attr(not(feature = "rv_outline"), inline)]
     pub fn push_call(&self, mc: &Mutation<'gc>, method: Method<'gc>) {
         self.call_stack.borrow_mut(mc).push(method)
     }
 
     /// Pops an executable off the call stack
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    #[cfg_attr(not(feature = "rv_outline"), inline)]
     pub fn pop_call(&self, mc: &Mutation<'gc>) {
         self.call_stack.borrow_mut(mc).pop();
     }

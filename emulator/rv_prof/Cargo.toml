@@ -1,0 +1,8 @@
+[package]
+name = "rv_prof"
+version = "0.1.0"
+edition = "2021"
+description = "RuffleVita's sampling profiler (see src/lib.rs)"
+publish = false
+
+[dependencies]

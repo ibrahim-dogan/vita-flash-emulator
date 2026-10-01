@@ -510,6 +510,7 @@ impl Player {
         if !self.is_playing() {
             return;
         }
+        crate::rv_clock::advance(dt);
 
         self.frame_accumulator += dt;
         let frame_time = self.frame_time(1000.0);
@@ -558,12 +559,16 @@ impl Player {
 
         // Adjust playback speed for next frame to stay in sync with timeline audio tracks ("stream" sounds).
         let cur_frame_offset = self.frame_accumulator;
-        self.frame_accumulator += self.mutate_with_update_context(|context| {
-            context
-                .audio_manager
-                .audio_skew_time(context.audio, cur_frame_offset)
-                * 1000.0
-        });
+        // RuffleVita: not in repeatable timedemos (rv_clock), where it would
+        // make the frame count depend on how fast audio plays.
+        if !crate::rv_clock::is_enabled() {
+            self.frame_accumulator += self.mutate_with_update_context(|context| {
+                context
+                    .audio_manager
+                    .audio_skew_time(context.audio, cur_frame_offset)
+                    * 1000.0
+            });
+        }
 
         self.update_sockets();
         self.update_net_connections();
@@ -571,7 +576,10 @@ impl Player {
         self.update(|context| {
             StreamManager::tick(context, dt);
         });
-        self.audio.tick();
+        {
+            let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Audio);
+            self.audio.tick();
+        }
     }
 
     pub fn time_til_next_timer(&self) -> Option<f64> {
@@ -1995,6 +2003,7 @@ impl Player {
 
     #[instrument(level = "debug", skip_all)]
     pub fn run_frame(&mut self) {
+        let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::RunFrame);
         let frame_time = self.frame_time(750_000_000.0);
         let frame_time = Duration::from_nanos(frame_time as u64);
         let (mut execution_limit, may_execute_while_streaming) = match self.load_behavior {
@@ -2008,7 +2017,10 @@ impl Player {
             ),
             LoadBehavior::Blocking => (ExecutionLimit::none(), false),
         };
-        let preload_finished = self.preload(&mut execution_limit);
+        let preload_finished = {
+            let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Preload);
+            self.preload(&mut execution_limit)
+        };
 
         if !preload_finished && !may_execute_while_streaming {
             return;
@@ -2016,9 +2028,18 @@ impl Player {
 
         self.update(|context| {
             // TODO: Is this order correct?
-            run_all_phases_avm2(context);
-            Avm1::run_frame(context);
-            AudioManager::update_sounds(context);
+            {
+                let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Avm2Phases);
+                run_all_phases_avm2(context);
+            }
+            {
+                let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Avm1Timeline);
+                Avm1::run_frame(context);
+            }
+            {
+                let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Audio);
+                AudioManager::update_sounds(context);
+            }
             LocalConnections::update_connections(context);
 
             // Only run the current list of callbacks - any callbacks added during callback execution
@@ -2033,6 +2054,7 @@ impl Player {
 
     #[instrument(level = "debug", skip_all)]
     pub fn render(&mut self) {
+        let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::RenderList);
         let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
 
         if invalidated {
@@ -2080,8 +2102,10 @@ impl Player {
             (cache_draws, commands)
         });
 
-        self.renderer
-            .submit_frame(background_color, commands, cache_draws);
+        {
+            let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::RenderGl);
+            self.renderer.submit_frame(background_color, commands, cache_draws);
+        }
 
         self.needs_render = false;
     }
@@ -2144,6 +2168,7 @@ impl Player {
     }
 
     pub fn run_actions(context: &mut UpdateContext<'_>) {
+        let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::QueuedActions);
         // Note that actions can queue further actions, so a while loop is necessary here.
         while let Some(action) = context.action_queue.pop_action() {
             // We don't run frame actions if the clip was removed (or scheduled to be removed) after it queued the action.
@@ -2157,6 +2182,11 @@ impl Player {
             match action.action_type {
                 // DoAction/clip event code.
                 ActionType::Normal { bytecode } | ActionType::Initialize { bytecode } => {
+                    // RuffleVita: name frame and clip-event scripts for rv_prof.
+                    let _function = crate::rv_prof::enter_function(crate::rv_prof::register_function(
+                        (bytecode.movie.data().as_ptr() as usize, bytecode.start),
+                        || format!("script on {} +0x{:x}", action.clip.path(), bytecode.start),
+                    ));
                     Avm1::run_stack_frame_for_action(action.clip, "[Frame]", bytecode, context);
                 }
                 // Change the prototype of a MovieClip and run constructor events.
@@ -2379,10 +2409,16 @@ impl Player {
         self.mutate_with_update_context(|context| {
             Self::update_drag(context);
         });
-        self.update_mouse_state(&HashSet::new(), false, &mut false);
+        {
+            let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Mouse);
+            self.update_mouse_state(&HashSet::new(), false, &mut false);
+        }
 
         // GC
-        self.gc_arena.borrow_mut().collect_debt();
+        {
+            let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Gc);
+            self.gc_arena.borrow_mut().collect_debt();
+        }
 
         rval
     }
@@ -2417,6 +2453,7 @@ impl Player {
     /// Update all AVM-based timers (such as created via setInterval).
     /// Returns the approximate amount of time until the next timer tick.
     pub fn update_timers(&mut self, dt: f64) {
+        let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Timers);
         self.time_til_next_timer =
             self.mutate_with_update_context(|context| Timers::update_timers(context, dt));
     }

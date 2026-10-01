@@ -17,7 +17,7 @@ use crate::avm2::object::{
 use crate::avm2::object::{Object, TObject};
 use crate::avm2::op::{LookupSwitch, Op};
 use crate::avm2::scope::{search_scope_stack, Scope, ScopeChain};
-use crate::avm2::script::Script;
+use crate::avm2::script::{Script, TranslationUnit};
 use crate::avm2::stack::StackFrame;
 use crate::avm2::value::Value;
 use crate::avm2::Multiname;
@@ -57,7 +57,7 @@ pub struct Activation<'a, 'gc: 'a> {
     /// The movie that called this builtin method.
     /// This is intended to be used only for builtin methods- if this activation's method
     /// is a bytecode method, the movie will instead be the movie that the bytecode method came from.
-    caller_movie: Option<Arc<SwfMovie>>,
+    caller_movie: CallerMovie<'gc>,
 
     /// The superclass of the class that yielded the currently executing method.
     ///
@@ -116,12 +116,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ///
     /// It is a logic error to attempt to run AVM2 code in a nothing
     /// `Activation`.
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     pub fn from_nothing(context: &'a mut UpdateContext<'gc>) -> Self {
         Self {
             num_locals: 0,
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: None,
-            caller_movie: None,
+            caller_movie: CallerMovie::None,
             bound_superclass_object: None,
             stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
@@ -144,7 +145,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             num_locals: 0,
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: Some(domain),
-            caller_movie: None,
+            caller_movie: CallerMovie::None,
             bound_superclass_object: None,
             stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
@@ -304,6 +305,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// method.
     /// NOTE: this is intended to be used immediately after from_nothing(),
     /// as a more efficient replacement for direct `Activation::from_method()`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     #[expect(clippy::too_many_arguments)]
     pub fn init_from_method(
         &mut self,
@@ -323,13 +325,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let has_rest_or_args = method.is_variadic();
 
         if let Some(bound_class) = method.bound_class() {
-            assert!(this.is_of_type(bound_class));
+            debug_assert!(this.is_of_type(bound_class));
         }
 
         self.num_locals = num_locals;
         self.outer = outer;
         self.caller_domain = Some(outer.domain());
-        self.caller_movie = Some(method.owner_movie());
+        self.caller_movie = CallerMovie::Unit(method.translation_unit());
         self.bound_superclass_object = bound_superclass_object;
         self.stack = stack_frame;
         self.scope_depth = self.context.avm2.scope_stack.len();
@@ -419,7 +421,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         bound_superclass_object: Option<ClassObject<'gc>>,
         outer: ScopeChain<'gc>,
         caller_domain: Option<Domain<'gc>>,
-        caller_movie: Option<Arc<SwfMovie>>,
+        caller_movie: CallerMovie<'gc>,
     ) -> Self {
         Self {
             num_locals: 0,
@@ -493,6 +495,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// Returns the movie of the original AS3 caller. This will be `None`
     /// if this activation was constructed with `from_nothing`
     pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
+        match &self.caller_movie {
+            CallerMovie::None => None,
+            CallerMovie::Unit(unit) => Some(unit.movie()),
+            CallerMovie::Movie(movie) => Some(movie.clone()),
+        }
+    }
+
+    /// The caller's movie as `from_builtin` takes it, without touching the `Arc`.
+    pub(crate) fn caller_movie_handle(&self) -> CallerMovie<'gc> {
         self.caller_movie.clone()
     }
 
@@ -565,7 +576,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ///
     /// This function should take `mut self` instead of `&mut self`, but that
     /// results in worse codegen (the entire Activation is moved).
-    #[inline]
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     pub fn cleanup(&mut self) {
         self.clear_scope();
 
@@ -607,12 +618,48 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let opcodes = verified_info.parsed_code.as_slice();
 
         self.timeout_check()?;
+        // RuffleVita: AVM2 profiling marks are a build option (`rv_prof_ops`):
+        // even these per-call stores cost 1% on call-heavy AS3.
+        #[cfg(feature = "rv_prof_ops")]
+        let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Avm2Code);
+        #[cfg(feature = "rv_prof_ops")]
+        let _function = crate::rv_prof::enter_function(method.prof_id());
+
+        #[cfg(feature = "rv_opstats")]
+        crate::avm2::opstats::break_sequence();
 
         let mut ip = 0;
+
+        // RuffleVita: taken branches go to `offset`; backward ones count
+        // towards the script timeout.
+        macro_rules! jump {
+            ($taken:expr, $offset:expr) => {{
+                if $taken {
+                    let target = $offset;
+                    if target < ip {
+                        self.timeout_check()?;
+                    }
+                    ip = target;
+                }
+                continue;
+            }};
+        }
+        macro_rules! fused_jump {
+            ($taken:expr, $offset:expr) => {
+                match $taken {
+                    Ok(taken) => jump!(taken, $offset),
+                    Err(error) => Err(error),
+                }
+            };
+        }
 
         loop {
             let op = &opcodes[ip];
             ip += 1;
+            #[cfg(feature = "rv_prof_ops")]
+            crate::rv_prof::avm2_op(std::intrinsics::discriminant_value(op) as u8, op);
+            #[cfg(feature = "rv_opstats")]
+            crate::avm2::opstats::record(op);
             avm_debug!(self.avm2(), "Opcode: {op:?}");
 
             let result = match op {
@@ -629,6 +676,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Op::Pop => self.op_pop(),
                 Op::Dup => self.op_dup(),
                 Op::GetLocal { index } => self.op_get_local(*index),
+                Op::GetLocalSlot { index, slot } => self.op_get_local_slot(*index, *slot),
+                Op::GetLocal2 { first, second } => {
+                    let (a, b) = (self.local_register(*first), self.local_register(*second));
+                    self.push_stack(a);
+                    self.push_stack(b);
+                    Ok(())
+                }
+                Op::SetLocalGetLocal { set, get } => {
+                    let value = self.pop_stack();
+                    self.set_local_register(*set, value);
+                    let value = self.local_register(*get);
+                    self.push_stack(value);
+                    Ok(())
+                }
                 Op::SetLocal { index } => self.op_set_local(*index),
                 Op::StoreLocal { index } => self.op_store_local(*index),
                 Op::Kill { index } => self.op_kill(*index),
@@ -791,38 +852,59 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 Op::Throw => self.op_throw(),
 
                 // Branch ops
+                //
+                // RuffleVita: only backward branches can loop, so only they
+                // count towards the script timeout.
                 Op::Jump { offset } => {
-                    self.timeout_check()?;
-
-                    ip = *offset;
-
-                    continue;
+                    jump!(true, *offset)
                 }
                 Op::IfTrue { offset } => {
-                    self.timeout_check()?;
-
-                    if self.check_if_true() {
-                        ip = *offset;
-                    }
-
-                    continue;
+                    jump!(self.check_if_true(), *offset)
                 }
                 Op::IfFalse { offset } => {
-                    self.timeout_check()?;
-
-                    if !self.check_if_true() {
-                        ip = *offset;
-                    }
-
-                    continue;
+                    jump!(!self.check_if_true(), *offset)
                 }
                 Op::PopJump { offset } => {
-                    self.timeout_check()?;
-
                     let _ = self.pop_stack();
-                    ip = *offset;
-
-                    continue;
+                    jump!(true, *offset)
+                }
+                Op::IfLt { offset } => {
+                    fused_jump!(self.fused_lt(false).map(|r| r == Some(true)), *offset)
+                }
+                Op::IfNotLt { offset } => {
+                    fused_jump!(self.fused_lt(false).map(|r| r != Some(true)), *offset)
+                }
+                Op::IfGe { offset } => {
+                    fused_jump!(self.fused_lt(false).map(|r| r == Some(false)), *offset)
+                }
+                Op::IfNotGe { offset } => {
+                    fused_jump!(self.fused_lt(false).map(|r| r != Some(false)), *offset)
+                }
+                Op::IfGt { offset } => {
+                    fused_jump!(self.fused_lt(true).map(|r| r == Some(true)), *offset)
+                }
+                Op::IfNotGt { offset } => {
+                    fused_jump!(self.fused_lt(true).map(|r| r != Some(true)), *offset)
+                }
+                Op::IfLe { offset } => {
+                    fused_jump!(self.fused_lt(true).map(|r| r == Some(false)), *offset)
+                }
+                Op::IfNotLe { offset } => {
+                    fused_jump!(self.fused_lt(true).map(|r| r != Some(false)), *offset)
+                }
+                Op::IfEq { offset } => {
+                    fused_jump!(self.fused_eq(), *offset)
+                }
+                Op::IfNotEq { offset } => {
+                    fused_jump!(self.fused_eq().map(|r| !r), *offset)
+                }
+                Op::IfStrictEq { offset } => {
+                    let (value1, value2) = self.stack.pop2();
+                    jump!(value1.strict_eq(&value2), *offset)
+                }
+                Op::IfNotStrictEq { offset } => {
+                    let (value1, value2) = self.stack.pop2();
+                    jump!(!value1.strict_eq(&value2), *offset)
                 }
                 Op::LookupSwitch(lookup_switch) => {
                     self.timeout_check()?;
@@ -911,21 +993,27 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_double(&mut self, value: f64) -> Result<(), Error<'gc>> {
         self.push_stack(value);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_false(&mut self) -> Result<(), Error<'gc>> {
         self.push_stack(false);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_int(&mut self, value: i32) -> Result<(), Error<'gc>> {
         self.push_stack(value);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_push_namespace(&mut self, namespace: Namespace<'gc>) -> Result<(), Error<'gc>> {
         let ns_object = NamespaceObject::from_namespace(self, namespace);
 
@@ -933,42 +1021,52 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_null(&mut self) -> Result<(), Error<'gc>> {
         self.push_stack(Value::Null);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_short(&mut self, value: i16) -> Result<(), Error<'gc>> {
         self.push_stack(value);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_push_string(&mut self, string: AvmAtom<'gc>) -> Result<(), Error<'gc>> {
         self.push_stack(string);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_true(&mut self) -> Result<(), Error<'gc>> {
         self.push_stack(true);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_uint(&mut self, value: u32) -> Result<(), Error<'gc>> {
         self.push_stack(value);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_push_undefined(&mut self) -> Result<(), Error<'gc>> {
         self.push_stack(Value::Undefined);
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_pop(&mut self) -> Result<(), Error<'gc>> {
         let _ = self.pop_stack();
 
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_dup(&mut self) -> Result<(), Error<'gc>> {
         let value = self.stack.peek(0);
         self.push_stack(value);
@@ -976,6 +1074,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_local(&mut self, register_index: u32) -> Result<(), Error<'gc>> {
         let value = self.local_register(register_index);
         self.push_stack(value);
@@ -983,6 +1082,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_set_local(&mut self, register_index: u32) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -991,6 +1091,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_store_local(&mut self, register_index: u32) -> Result<(), Error<'gc>> {
         let value = self.stack.peek(0);
 
@@ -999,12 +1100,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_kill(&mut self, register_index: u32) -> Result<(), Error<'gc>> {
         self.set_local_register(register_index, Value::Undefined);
 
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let receiver = self.pop_stack();
@@ -1017,6 +1122,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_method(
         &mut self,
         index: u32,
@@ -1042,6 +1150,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_native(
         &mut self,
         method: NativeMethodImpl,
@@ -1065,6 +1176,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_property(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1081,6 +1195,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_prop_lex(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1097,6 +1214,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_prop_void(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1111,6 +1231,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_static(&mut self, method: Method<'gc>, arg_count: u32) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let receiver = self.pop_stack();
@@ -1132,6 +1255,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_call_super(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1189,6 +1315,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_get_property_static(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1202,6 +1331,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_get_property_fast(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1246,6 +1378,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.op_get_property_slow(multiname)
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_get_property_slow(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1260,6 +1395,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_set_property_static(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1275,6 +1413,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_set_property_fast(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1321,6 +1462,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.op_set_property_slow(multiname)
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_set_property_slow(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1337,6 +1481,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_init_property(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -1349,6 +1496,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_delete_property(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         // default path for static names
         if !multiname.has_lazy_component() {
@@ -1404,6 +1554,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_get_super(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         let multiname = multiname.fill_with_runtime_params(self)?;
 
@@ -1428,6 +1581,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_set_super(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
         let multiname = multiname.fill_with_runtime_params(self)?;
@@ -1451,6 +1607,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_in(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().null_check(self, None)?;
         let name_value = self.pop_stack();
@@ -1491,6 +1650,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_newcatch(&mut self, method: Method<'gc>, index: usize) -> Result<(), Error<'gc>> {
         // TODO can we store the catch class in the op?
         let verified_info = method.get_verified_info();
@@ -1513,6 +1673,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_push_scope(&mut self) -> Result<(), Error<'gc>> {
         let object = self.pop_stack().null_check(self, None)?;
         self.push_scope(Scope::new(object));
@@ -1520,6 +1683,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_push_with(&mut self) -> Result<(), Error<'gc>> {
         let object = self.pop_stack().null_check(self, None)?;
         self.push_scope(Scope::new_with(object));
@@ -1527,12 +1693,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_pop_scope(&mut self) -> Result<(), Error<'gc>> {
         self.pop_scope();
 
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_outer_scope(&mut self, index: usize) -> Result<(), Error<'gc>> {
         // Verifier ensures that this points to a valid outer scope
 
@@ -1543,6 +1713,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_scope_object(&mut self, index: usize) -> Result<(), Error<'gc>> {
         // Verifier ensures that this points to a valid local scope
 
@@ -1553,6 +1724,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_find_def(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         // Verifier ensures that multiname is non-lazy
 
@@ -1563,6 +1735,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_find_property(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         avm_debug!(self.context.avm2, "Resolving {:?}", *multiname);
 
@@ -1576,6 +1751,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_find_prop_strict(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1592,6 +1770,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_script_globals(&mut self, script: Script<'gc>) -> Result<(), Error<'gc>> {
         let globals = script.globals(self.context)?;
 
@@ -1600,6 +1779,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_get_descendants(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         let multiname = multiname.fill_with_runtime_params(self)?;
         let object = self.pop_stack().null_check(self, None)?;
@@ -1628,6 +1810,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let stack_top = self.stack.stack_top();
 
@@ -1647,6 +1830,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    /// RuffleVita: GetLocal + GetSlot.
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    fn op_get_local_slot(&mut self, register_index: u32, index: u32) -> Result<(), Error<'gc>> {
+        let object = self
+            .local_register(register_index)
+            .null_check(self, None)?
+            .as_object()
+            .expect("Cannot get_slot on primitive");
+
+        self.push_stack(object.get_slot(index));
+
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_set_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
         let object = self
@@ -1660,6 +1858,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_set_slot_no_coerce(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
         let object = self
@@ -1673,6 +1872,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_set_global_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -1684,6 +1886,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_construct(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let ctor = self.pop_stack();
@@ -1695,6 +1900,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_construct_prop(
         &mut self,
         multiname: Gc<'gc, Multiname<'gc>>,
@@ -1712,6 +1920,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_construct_slot(&mut self, index: u32, arg_count: u32) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let source = self
@@ -1728,6 +1939,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_construct_super(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let receiver = self.pop_stack().null_check(self, None)?;
@@ -1737,6 +1951,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_new_activation(&mut self, activation_class: Class<'gc>) -> Result<(), Error<'gc>> {
         // Create the activation object. Activation objects don't have prototypes,
         // and we can give it the Class's vtable because `Class::for_activation`
@@ -1753,6 +1968,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_new_object(&mut self, num_args: u32) -> Result<(), Error<'gc>> {
         let object = ScriptObject::new_object(self);
 
@@ -1768,6 +1986,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_new_function(&mut self, method: Method<'gc>) -> Result<(), Error<'gc>> {
         let scope = self.create_scopechain();
 
@@ -1778,6 +1999,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_new_class(&mut self, class: Class<'gc>) -> Result<(), Error<'gc>> {
         let base_value = self.pop_stack();
 
@@ -1829,6 +2051,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_apply_type(&mut self, num_types: u32) -> Result<(), Error<'gc>> {
         let args = self.pop_stack_args(num_types);
         let base = self
@@ -1843,6 +2068,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_new_array(&mut self, num_args: u32) -> Result<(), Error<'gc>> {
         let args = self.pop_stack_args(num_args);
         let array = ArrayStorage::from_args(&args[..]);
@@ -1853,6 +2081,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_b(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_boolean();
 
@@ -1861,6 +2090,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_d(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_number(self)?;
 
@@ -1869,6 +2099,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_d_swap_pop(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_number(self)?;
         let _ = self.pop_stack();
@@ -1878,6 +2109,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_i(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_i32(self)?;
 
@@ -1886,6 +2118,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_i_swap_pop(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_i32(self)?;
         let _ = self.pop_stack();
@@ -1895,6 +2128,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_coerce_o(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -1908,6 +2144,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_coerce_s(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -1922,6 +2161,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_u(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_u32(self)?;
 
@@ -1930,6 +2170,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_coerce_u_swap_pop(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_u32(self)?;
         let _ = self.pop_stack();
@@ -1939,6 +2180,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_convert_o(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().null_check(self, None)?;
 
@@ -1947,6 +2191,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_convert_s(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_string(self)?;
 
@@ -1955,6 +2202,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_check_filter(&mut self) -> Result<(), Error<'gc>> {
         let xml = self.avm2().class_defs().xml;
         let xml_list = self.avm2().class_defs().xml_list;
@@ -1974,6 +2222,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_add(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2030,6 +2281,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_add_i(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_i32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2039,6 +2293,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_bitand(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_i32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2048,6 +2303,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_bitnot(&mut self) -> Result<(), Error<'gc>> {
         let value1 = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2056,6 +2312,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_bitor(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_i32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2065,6 +2322,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_bitxor(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_i32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2074,6 +2332,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_declocal(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.local_register(index).coerce_to_number(self)?;
 
@@ -2082,6 +2341,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_declocal_i(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.local_register(index).coerce_to_i32(self)?;
 
@@ -2090,6 +2350,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_number(self)?;
 
@@ -2098,6 +2359,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_decrement_i(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2106,6 +2368,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_divide(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_number(self)?;
         let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -2115,6 +2378,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_inclocal(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.local_register(index).coerce_to_number(self)?;
 
@@ -2123,6 +2387,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_inclocal_i(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.local_register(index).coerce_to_i32(self)?;
 
@@ -2131,6 +2396,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_increment(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_number(self)?;
 
@@ -2139,6 +2405,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_increment_i(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2147,6 +2414,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_lshift(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_u32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2156,6 +2424,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_modulo(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_number(self)?;
         let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -2165,6 +2436,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_multiply(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2179,6 +2453,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 return Ok(());
             }
         }
+        // RuffleVita: the common case in physics code.
+        if let (Value::Number(n1), Value::Number(n2)) = (value1, value2) {
+            self.push_stack(n1 * n2);
+            return Ok(());
+        }
         let value2 = value2.coerce_to_number(self)?;
         let value1 = value1.coerce_to_number(self)?;
         self.push_stack(value1 * value2);
@@ -2186,6 +2465,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_multiply_i(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_i32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2195,6 +2475,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_negate(&mut self) -> Result<(), Error<'gc>> {
         let value1 = self.pop_stack().coerce_to_number(self)?;
 
@@ -2203,6 +2484,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_negate_i(&mut self) -> Result<(), Error<'gc>> {
         let value1 = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2211,6 +2493,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_rshift(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_u32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2220,6 +2503,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_subtract(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2240,6 +2526,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_i32(self)?;
         let value1 = self.pop_stack().coerce_to_i32(self)?;
@@ -2249,6 +2536,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_swap(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2259,6 +2547,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_urshift(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack().coerce_to_u32(self)?;
         let value1 = self.pop_stack().coerce_to_u32(self)?;
@@ -2274,6 +2563,34 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         value.coerce_to_boolean()
     }
 
+    /// RuffleVita: pops `a, b` and compares `a < b` (or `b < a` when
+    /// `swapped`), for the fused compare-and-branch ops.
+    #[inline(always)]
+    fn fused_lt(&mut self, swapped: bool) -> Result<Option<bool>, Error<'gc>> {
+        let (value1, value2) = self.stack.pop2();
+        let (a, b) = if swapped { (value2, value1) } else { (value1, value2) };
+        match (a, b) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(Some(a < b)),
+            (Value::Number(a), Value::Number(b)) => {
+                Ok(if a.is_nan() || b.is_nan() { None } else { Some(a < b) })
+            }
+            _ => a.abstract_lt(&b, self),
+        }
+    }
+
+    #[inline(always)]
+    fn fused_eq(&mut self) -> Result<bool, Error<'gc>> {
+        let (value1, value2) = self.stack.pop2();
+        match (value1, value2) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(a == b),
+            (Value::Number(a), Value::Number(b)) => Ok(a == b),
+            _ => value1.abstract_eq(&value2, self),
+        }
+    }
+
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_strict_equals(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2282,6 +2599,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_equals(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2293,6 +2613,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_greater_equals(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2304,6 +2627,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_greater_than(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2315,6 +2641,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_less_equals(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2326,6 +2655,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_less_than(&mut self) -> Result<(), Error<'gc>> {
         let value2 = self.pop_stack();
         let value1 = self.pop_stack();
@@ -2337,6 +2669,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_not(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack().coerce_to_boolean();
 
@@ -2345,6 +2678,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_has_next(&mut self) -> Result<(), Error<'gc>> {
         let cur_index = self.pop_stack().coerce_to_i32(self)?;
         let value = self.pop_stack();
@@ -2371,6 +2705,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         Ok(())
     }
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_has_next_2(
         &mut self,
         object_register: u32,
@@ -2425,6 +2760,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_next_name(&mut self) -> Result<(), Error<'gc>> {
         let cur_index = self.pop_stack().coerce_to_i32(self)?;
         let value = self.pop_stack();
@@ -2448,6 +2784,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_next_value(&mut self) -> Result<(), Error<'gc>> {
         let cur_index = self.pop_stack().coerce_to_i32(self)?;
         let value = self.pop_stack();
@@ -2471,6 +2808,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_is_type(&mut self, class: Class<'gc>) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -2480,6 +2820,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_is_type_late(&mut self) -> Result<(), Error<'gc>> {
         let Some(type_object) = self
             .pop_stack()
@@ -2500,6 +2843,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_as_type(&mut self, class: Class<'gc>) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -2512,6 +2858,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_as_type_late(&mut self) -> Result<(), Error<'gc>> {
         let class = self.pop_stack();
 
@@ -2542,6 +2891,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_instance_of(&mut self) -> Result<(), Error<'gc>> {
         let Some(type_object) = self.pop_stack().as_object() else {
             return Err(Error::avm_error(type_error(
@@ -2574,6 +2926,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_type_of(&mut self) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
@@ -2616,17 +2971,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Dxns`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_dxns(&mut self) -> Result<(), Error<'gc>> {
         Err("Unimplemented opcode Dxns.".into())
     }
 
     /// Implements `Op::DxnsLate`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_dxns_late(&mut self) -> Result<(), Error<'gc>> {
         let _ = self.pop_stack();
         Err("Unimplemented opcode DxnsLate.".into())
     }
 
     /// Implements `Op::EscXAttr`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_esc_xattr(&mut self) -> Result<(), Error<'gc>> {
         let s = self.pop_stack().coerce_to_string(self)?;
 
@@ -2638,6 +2996,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::EscXElem`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_esc_elem(&mut self) -> Result<(), Error<'gc>> {
         let r = match self.pop_stack() {
             // We explicitly call toXMLString on Xml/XmlListObject since the toString of these objects have special handling for simple content, which is not used here.
@@ -2667,6 +3026,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Coerce`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_coerce(&mut self, class: Class<'gc>) -> Result<(), Error<'gc>> {
         let val = self.pop_stack();
         let x = val.coerce_to_type(self, class)?;
@@ -2675,6 +3037,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_coerce_swap_pop(&mut self, class: Class<'gc>) -> Result<(), Error<'gc>> {
         let val = self.pop_stack();
         let _ = self.pop_stack();
@@ -2694,6 +3059,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Si8`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_si8(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
         let val = self.pop_stack().coerce_to_i32(self)? as i8;
@@ -2713,6 +3079,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Si16`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_si16(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
         let val = self.pop_stack().coerce_to_i32(self)? as i16;
@@ -2731,6 +3098,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Si32`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_si32(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
         let val = self.pop_stack().coerce_to_i32(self)?;
@@ -2749,6 +3117,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Sf32`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_sf32(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
         let val = self.pop_stack().coerce_to_number(self)? as f32;
@@ -2767,6 +3136,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Sf64`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_sf64(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_i32(self)?;
         let val = self.pop_stack().coerce_to_number(self)?;
@@ -2785,6 +3155,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Li8`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_li8(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_u32(self)? as usize;
         let dm = self.domain_memory().storage();
@@ -2801,6 +3172,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Li16`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_li16(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_u32(self)? as usize;
         let dm = self.domain_memory().storage();
@@ -2816,6 +3188,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Li32`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_li32(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_u32(self)? as usize;
         let dm = self.domain_memory().storage();
@@ -2830,6 +3203,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Lf32`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_lf32(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_u32(self)? as usize;
         let dm = self.domain_memory().storage();
@@ -2845,6 +3219,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Lf64`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_lf64(&mut self) -> Result<(), Error<'gc>> {
         let address = self.pop_stack().coerce_to_u32(self)? as usize;
         let dm = self.domain_memory().storage();
@@ -2859,6 +3234,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Sxi1`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_sxi1(&mut self) -> Result<(), Error<'gc>> {
         let val = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2870,6 +3246,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Sxi8`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_sxi8(&mut self) -> Result<(), Error<'gc>> {
         let val = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2881,6 +3258,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     /// Implements `Op::Sxi16`
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_sxi16(&mut self) -> Result<(), Error<'gc>> {
         let val = self.pop_stack().coerce_to_i32(self)?;
 
@@ -2892,6 +3270,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     #[cfg(feature = "avm_debug")]
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_debug(
         &mut self,
         is_local_register: bool,
@@ -2917,6 +3296,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     #[cfg(not(feature = "avm_debug"))]
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_debug(
         &mut self,
         _is_local_register: bool,
@@ -2927,6 +3307,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     #[cfg(feature = "avm_debug")]
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_debug_file(&mut self, file_name: AvmAtom<'gc>) -> Result<(), Error<'gc>> {
         avm_debug!(self.avm2(), "File: {file_name}");
 
@@ -2934,33 +3315,185 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     #[cfg(not(feature = "avm_debug"))]
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_debug_file(&mut self, _file_name: AvmAtom<'gc>) -> Result<(), Error<'gc>> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_debug_line(&mut self, line_num: u32) -> Result<(), Error<'gc>> {
         avm_debug!(self.avm2(), "Line: {line_num}");
 
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_bkpt(&mut self) -> Result<(), Error<'gc>> {
         // while a debugger is not attached, this is a no-op
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_bkpt_line(&mut self, _line_num: u32) -> Result<(), Error<'gc>> {
         // while a debugger is not attached, this is a no-op
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_timestamp(&mut self) -> Result<(), Error<'gc>> {
         // while a debugger is not attached, this is a no-op
         Ok(())
     }
 
+    #[cfg_attr(feature = "rv_outline", inline(never))]
+    // RuffleVita: also called from aot_execute; keep it inlined into run_actions.
+    #[cfg_attr(not(feature = "rv_outline"), inline(always))]
     fn op_throw(&mut self) -> Result<(), Error<'gc>> {
         let error_val = self.pop_stack();
         Err(Error::avm_error(error_val))
+    }
+}
+
+/// RuffleVita: the movie of an activation's caller. Bytecode methods keep
+/// their translation unit (a free copy) and only make an `Arc<SwfMovie>` when
+/// something asks for it: cloning and dropping the `Arc` on every AS3 call
+/// is two atomic operations, which the Vita's ARM cores pay dearly for.
+#[derive(Clone)]
+pub enum CallerMovie<'gc> {
+    None,
+    Unit(TranslationUnit<'gc>),
+    #[allow(dead_code)]
+    Movie(Arc<SwfMovie>),
+}
+
+/// RuffleVita: what AOT-compiled methods (`crate::avm2::aot`) use of the
+/// interpreter. Compiled code keeps locals and the operand stack in Rust
+/// variables, and hands the ops it doesn't compile itself to the
+/// interpreter's own handlers: it pushes the op's operands onto this
+/// activation's operand stack, calls `aot_execute`, and pops the result.
+#[allow(dead_code)] // Used by generated code, which may be empty.
+impl<'gc> Activation<'_, 'gc> {
+    /// Runs one op that only works on the operand stack (and the scope
+    /// stack, globals and objects), exactly as `run_actions` would. Returns
+    /// false for ops that touch locals or control flow, which compiled code
+    /// must handle itself (the translator never delegates those).
+    pub(crate) fn aot_execute(&mut self, op: &Op<'gc>) -> Result<bool, Error<'gc>> {
+        match op {
+            Op::PushNamespace { namespace } => self.op_push_namespace(*namespace),
+            Op::PushString { string } => self.op_push_string(*string),
+            Op::Call { num_args } => self.op_call(*num_args),
+            Op::CallMethod { index, num_args, push_return_value } => {
+                self.op_call_method(*index, *num_args, *push_return_value)
+            }
+            Op::CallNative { method, num_args, push_return_value } => {
+                self.op_call_native(*method, *num_args, *push_return_value)
+            }
+            Op::CallProperty { multiname, num_args } => self.op_call_property(*multiname, *num_args),
+            Op::CallPropLex { multiname, num_args } => self.op_call_prop_lex(*multiname, *num_args),
+            Op::CallPropVoid { multiname, num_args } => self.op_call_prop_void(*multiname, *num_args),
+            Op::CallStatic { method, num_args } => self.op_call_static(*method, *num_args),
+            Op::CallSuper { multiname, num_args } => self.op_call_super(*multiname, *num_args),
+            Op::GetPropertyStatic { multiname } => self.op_get_property_static(*multiname),
+            Op::GetPropertyFast { multiname } => self.op_get_property_fast(*multiname),
+            Op::GetPropertySlow { multiname } => self.op_get_property_slow(*multiname),
+            Op::SetPropertyStatic { multiname } => self.op_set_property_static(*multiname),
+            Op::SetPropertyFast { multiname } => self.op_set_property_fast(*multiname),
+            Op::SetPropertySlow { multiname } => self.op_set_property_slow(*multiname),
+            Op::InitProperty { multiname } => self.op_init_property(*multiname),
+            Op::DeleteProperty { multiname } => self.op_delete_property(*multiname),
+            Op::GetSuper { multiname } => self.op_get_super(*multiname),
+            Op::SetSuper { multiname } => self.op_set_super(*multiname),
+            Op::In => self.op_in(),
+            Op::PushScope => self.op_push_scope(),
+            Op::PushWith => self.op_push_with(),
+            Op::PopScope => self.op_pop_scope(),
+            Op::FindProperty { multiname } => self.op_find_property(*multiname),
+            Op::FindPropStrict { multiname } => self.op_find_prop_strict(*multiname),
+            Op::GetDescendants { multiname } => self.op_get_descendants(*multiname),
+            Op::SetGlobalSlot { index } => self.op_set_global_slot(*index),
+            Op::Construct { num_args } => self.op_construct(*num_args),
+            Op::ConstructProp { multiname, num_args } => self.op_construct_prop(*multiname, *num_args),
+            Op::ConstructSlot { index, num_args } => self.op_construct_slot(*index, *num_args),
+            Op::ConstructSuper { num_args } => self.op_construct_super(*num_args),
+            Op::NewObject { num_args } => self.op_new_object(*num_args),
+            Op::NewFunction { method } => self.op_new_function(*method),
+            Op::ApplyType { num_types } => self.op_apply_type(*num_types),
+            Op::NewArray { num_args } => self.op_new_array(*num_args),
+            Op::CoerceO => self.op_coerce_o(),
+            Op::CoerceS => self.op_coerce_s(),
+            Op::ConvertO => self.op_convert_o(),
+            Op::ConvertS => self.op_convert_s(),
+            Op::Add => self.op_add(),
+            Op::AddI => self.op_add_i(),
+            Op::Modulo => self.op_modulo(),
+            Op::Multiply => self.op_multiply(),
+            Op::Subtract => self.op_subtract(),
+            Op::Equals => self.op_equals(),
+            Op::StrictEquals => self.op_strict_equals(),
+            Op::LessThan => self.op_less_than(),
+            Op::LessEquals => self.op_less_equals(),
+            Op::GreaterThan => self.op_greater_than(),
+            Op::GreaterEquals => self.op_greater_equals(),
+            Op::IsType { class } => self.op_is_type(*class),
+            Op::IsTypeLate => self.op_is_type_late(),
+            Op::AsType { class } => self.op_as_type(*class),
+            Op::AsTypeLate => self.op_as_type_late(),
+            Op::InstanceOf => self.op_instance_of(),
+            Op::TypeOf => self.op_type_of(),
+            Op::Coerce { class } => self.op_coerce(*class),
+            Op::CoerceSwapPop { class } => self.op_coerce_swap_pop(*class),
+            Op::Throw => self.op_throw(),
+            _ => return Ok(false),
+        }?;
+        Ok(true)
+    }
+
+    /// `ReturnValue`: coerces `value` to the return type the op carries.
+    pub(crate) fn aot_return_value(&mut self, value: Value<'gc>, op: &Op<'gc>) -> Result<Value<'gc>, Error<'gc>> {
+        match op {
+            Op::ReturnValue { return_type: Some(class) } => value.coerce_to_type(self, *class),
+            _ => Ok(value),
+        }
+    }
+
+    /// `ReturnVoid`.
+    pub(crate) fn aot_return_void(&mut self, op: &Op<'gc>) -> Value<'gc> {
+        match op {
+            Op::ReturnVoid { return_type } => self.return_void(*return_type),
+            _ => Value::Undefined,
+        }
+    }
+
+    /// The script timeout check `run_actions` does on backward branches.
+    #[inline(always)]
+    pub(crate) fn aot_timeout_check(&mut self) -> Result<(), Error<'gc>> {
+        self.timeout_check()
+    }
+
+    /// `LookupSwitch`: the target op index for `index_value`.
+    pub(crate) fn aot_lookup_switch(&mut self, index_value: Value<'gc>, op: &Op<'gc>) -> usize {
+        let Op::LookupSwitch(lookup_switch) = op else { unreachable!("not a LookupSwitch") };
+        self.push_stack(index_value);
+        self.lookup_switch(lookup_switch)
+    }
+
+    /// Runs a compiled leaf method (`aot::LeafFn`) on this activation. While
+    /// it runs, the activation has the callee's outer scope, caller domain
+    /// and caller movie: all a leaf reads of its own activation.
+    #[inline(always)]
+    pub(crate) fn aot_run_leaf<R>(
+        &mut self,
+        method: Method<'gc>,
+        outer: ScopeChain<'gc>,
+        run: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved_outer = std::mem::replace(&mut self.outer, outer);
+        let saved_domain = std::mem::replace(&mut self.caller_domain, Some(outer.domain()));
+        let saved_movie = std::mem::replace(&mut self.caller_movie, CallerMovie::Unit(method.translation_unit()));
+        let result = run(self);
+        self.outer = saved_outer;
+        self.caller_domain = saved_domain;
+        self.caller_movie = saved_movie;
+        result
     }
 }

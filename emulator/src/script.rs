@@ -11,6 +11,8 @@ use crate::input::{Btn, Input, TouchPhase};
 
 enum Step {
     Wait(u32),
+    /// Wait until the game has run this many frames (see `Session::frames`).
+    At(u64),
     Sleep(u64),
     Press(Btn),
     Hold(Btn, u32),
@@ -37,6 +39,7 @@ pub struct Script {
     release: Option<(Btn, u32)>,
     touch_up: Option<(f32, f32)>,
     until: Option<std::time::Instant>,
+    at: Option<u64>,
 }
 
 fn parse_btn(s: &str) -> Option<Btn> {
@@ -51,6 +54,7 @@ impl Script {
             let parts: Vec<&str> = cmd.split_whitespace().collect();
             let step = match parts.as_slice() {
                 ["wait", n] => n.parse().ok().map(Step::Wait),
+                ["at", n] => n.parse().ok().map(Step::At),
                 ["sleep", ms] => ms.parse().ok().map(Step::Sleep),
                 ["press", b] => parse_btn(b).map(Step::Press),
                 ["hold", b, n] => parse_btn(b).zip(n.parse().ok()).map(|(b, n)| Step::Hold(b, n)),
@@ -68,11 +72,12 @@ impl Script {
                 None => eprintln!("RUFFLEVITA_SCRIPT: ignoring '{cmd}'"),
             }
         }
-        Some(Script { steps, wait: 0, release: None, touch_up: None, until: None })
+        Some(Script { steps, wait: 0, release: None, touch_up: None, until: None, at: None })
     }
 
-    /// Runs once per frame, before the app consumes input.
-    pub fn step(&mut self, input: &mut Input) -> Output {
+    /// Runs once per frame, before the app consumes input. `game_frame` is
+    /// the running game's frame count, if a game is running.
+    pub fn step(&mut self, input: &mut Input, game_frame: Option<u64>) -> Output {
         if let Some((b, n)) = self.release.take() {
             if n == 0 {
                 input.inject(b, false);
@@ -93,8 +98,15 @@ impl Script {
             }
             self.until = None;
         }
+        if let Some(n) = self.at {
+            if game_frame.is_none_or(|f| f < n) {
+                return Output::None;
+            }
+            self.at = None;
+        }
         match self.steps.pop_front() {
             Some(Step::Wait(n)) => self.wait = n,
+            Some(Step::At(n)) => self.at = Some(n),
             Some(Step::Sleep(ms)) => {
                 self.until = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms))
             }
@@ -200,15 +212,15 @@ fn save_png(gl: &glow::Context, w: u32, h: u32, path: &str, level: png::Compress
     }
     let file = match std::fs::File::create(path) {
         Ok(f) => f,
-        Err(e) => return eprintln!("screenshot {path}: {e}"),
+        Err(e) => return tracing::warn!("screenshot {path}: {e}"),
     };
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.set_compression(level);
     match enc.write_header().and_then(|mut wr| wr.write_image_data(&flipped)) {
-        Ok(()) if verbose => eprintln!("screenshot saved to {path}"),
+        Ok(()) if verbose => tracing::info!("screenshot saved to {path}"),
         Ok(()) => {}
-        Err(e) => eprintln!("screenshot {path}: {e}"),
+        Err(e) => tracing::warn!("screenshot {path}: {e}"),
     }
 }

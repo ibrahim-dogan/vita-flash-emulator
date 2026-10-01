@@ -19,7 +19,6 @@ mod library;
 mod net;
 mod platform;
 mod screens;
-#[cfg(not(target_os = "vita"))]
 mod script;
 mod session;
 mod swfinfo;
@@ -183,7 +182,11 @@ fn init_logging() {
 fn run() -> anyhow::Result<()> {
     let migrated = platform::migrate_old_data();
     platform::ensure_dirs();
+    let autorun = platform::apply_autorun();
     init_logging();
+    if !autorun.is_empty() {
+        tracing::info!("autorun.txt set {}", autorun.join(", "));
+    }
     // Out of memory aborts the app; say so in the log first.
     std::alloc::set_alloc_error_hook(|layout| {
         let memory = platform::memory_summary().unwrap_or_default();
@@ -197,6 +200,16 @@ fn run() -> anyhow::Result<()> {
     }
 
     sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
+    #[cfg(not(target_os = "vita"))]
+    let hidden = std::env::var_os("RUFFLEVITA_HIDDEN").is_some();
+    #[cfg(not(target_os = "vita"))]
+    if hidden {
+        // Benchmarks and scripted runs: no window, no Dock icon, no focus
+        // stealing. Keep the main thread on the performance cores so the
+        // numbers match a visible window.
+        sdl2::hint::set("SDL_MAC_BACKGROUND_APP", "1");
+        platform::keep_foreground_priority();
+    }
     sdl2::hint::set("SDL_MOUSE_TOUCH_EVENTS", "0");
     let sdl = sdl2::init().map_err(anyhow::Error::msg)?;
     let video = sdl.video().map_err(anyhow::Error::msg)?;
@@ -233,11 +246,13 @@ fn run() -> anyhow::Result<()> {
     gl_attr.set_stencil_size(8);
     gl_attr.set_double_buffer(true);
 
-    let window = video
-        .window("RuffleVita", SCREEN_W, SCREEN_H)
-        .opengl()
-        .position_centered()
-        .build()?;
+    let mut builder = video.window("RuffleVita", SCREEN_W, SCREEN_H);
+    builder.opengl().position_centered();
+    #[cfg(not(target_os = "vita"))]
+    if hidden {
+        builder.hidden();
+    }
+    let window = builder.build()?;
     let gl_context = window.gl_create_context().map_err(anyhow::Error::msg)?;
     window.gl_make_current(&gl_context).map_err(anyhow::Error::msg)?;
     let gl = Arc::new(unsafe {
@@ -246,6 +261,9 @@ fn run() -> anyhow::Result<()> {
 
     let settings = Settings::load();
     let _ = video.gl_set_swap_interval(if settings.vsync { 1 } else { 0 });
+    if std::env::var_os("RUFFLEVITA_BENCH").is_some() {
+        let _ = video.gl_set_swap_interval(0);
+    }
 
     let mut gfx = Gfx::new(gl.clone(), SCREEN_W, SCREEN_H)?;
     #[cfg(not(target_os = "vita"))]
@@ -264,6 +282,13 @@ fn run() -> anyhow::Result<()> {
 
     let mut event_pump = sdl.event_pump().map_err(anyhow::Error::msg)?;
     let mut app = App::new(gl, gfx, settings, window, video, audio, gc, controllers);
+    // Development: open a game straight away (`RUFFLEVITA_AUTOSTART=<file in the games folder>`).
+    if let Ok(game) = std::env::var("RUFFLEVITA_AUTOSTART") {
+        match app.lib.index_of(&game) {
+            Some(i) => app.start_game(i),
+            None => tracing::warn!("RUFFLEVITA_AUTOSTART: no game {game:?}"),
+        }
+    }
     app.run(&mut event_pump);
     drop(gl_context);
     Ok(())
@@ -307,9 +332,7 @@ struct App {
     /// Keep drawing the UI at full rate until this instant.
     busy_until: Instant,
     last_draw: Instant,
-    #[cfg(not(target_os = "vita"))]
     script: Option<script::Script>,
-    #[cfg(not(target_os = "vita"))]
     recorder: Option<script::Recorder>,
 }
 
@@ -353,9 +376,7 @@ impl App {
             capture_cover: false,
             busy_until: Instant::now() + Duration::from_secs(1),
             last_draw: Instant::now(),
-            #[cfg(not(target_os = "vita"))]
             script: script::Script::from_env(),
-            #[cfg(not(target_os = "vita"))]
             recorder: None,
         };
         if let Some(i) = app.settings.last_game.as_deref().and_then(|k| app.lib.index_of(k)) {
@@ -401,11 +422,10 @@ impl App {
                 self.input.handle_sdl(&event);
             }
 
-            #[cfg(not(target_os = "vita"))]
             let mut shot = None;
-            #[cfg(not(target_os = "vita"))]
             if let Some(s) = &mut self.script {
-                match s.step(&mut self.input) {
+                let game_frame = self.session.as_ref().filter(|_| matches!(self.mode, Mode::Playing)).map(|s| s.frames);
+                match s.step(&mut self.input, game_frame) {
                     script::Output::Screenshot(p) => shot = Some(p),
                     script::Output::Record(Some(d)) => self.recorder = Some(script::Recorder::new(&d)),
                     script::Output::Record(None) => {
@@ -428,12 +448,10 @@ impl App {
             let events = self.input.drain(!live);
             if live {
                 self.frame_game(&events, dt);
-                #[cfg(not(target_os = "vita"))]
                 let shot = match shot {
                     None if self.recorder.as_ref().is_some_and(|r| r.due()) => Some(String::new()),
                     s => s,
                 };
-                #[cfg(not(target_os = "vita"))]
                 if let Some(p) = shot {
                     // The game frame may not have been redrawn this iteration.
                     if let Some(s) = &mut self.session {
@@ -468,18 +486,15 @@ impl App {
                 && !screen_busy
                 && self.toast.is_none()
                 && Instant::now() > self.busy_until;
-            #[cfg(not(target_os = "vita"))]
             let idle = idle && self.recorder.is_none();
             if idle && self.last_draw.elapsed() < Duration::from_millis(500) {
                 std::thread::sleep(Duration::from_millis(16));
                 continue;
             }
             self.draw_ui();
-            #[cfg(not(target_os = "vita"))]
             if let Some(p) = shot {
                 script::save_screenshot(&self.gl, SCREEN_W, SCREEN_H, &p);
             }
-            #[cfg(not(target_os = "vita"))]
             if let Some(r) = self.recorder.as_mut().filter(|r| r.due()) {
                 r.capture(&self.gl, SCREEN_W, SCREEN_H);
             }
@@ -689,16 +704,20 @@ impl App {
                 }
             }
             let present = Instant::now();
+            let present_zone = ruffle_core::rv_prof::zone(ruffle_core::rv_prof::Zone::Present);
             session.draw_overlay(&mut self.gfx);
             if let Some(t) = &self.toast {
                 t.draw(&mut self.gfx);
             }
             self.gfx.flush();
             self.window.gl_swap_window();
+            drop(present_zone);
             session.add_present_time(present.elapsed());
             if !toast {
                 self.toast = None;
             }
+        } else if session.benchmarking() {
+            // Timedemo: next frame right away.
         } else {
             // Always yield at least 1 ms: games with 0-1 ms setInterval timers
             // would otherwise keep us spinning. Cap at 8 ms for input latency.

@@ -200,8 +200,9 @@ pub fn exec<'gc>(
 
     let ret = match method.method_kind() {
         MethodKind::Native { native_method, .. } => {
+            crate::rv_deep_zone!(Avm2Native);
             let caller_domain = activation.caller_domain();
-            let caller_movie = activation.caller_movie();
+            let caller_movie = activation.caller_movie_handle();
             let mut activation = Activation::from_builtin(
                 activation.context,
                 bound_superclass,
@@ -242,6 +243,7 @@ pub fn exec<'gc>(
             native_method(&mut activation, receiver, &arguments)
         }
         MethodKind::Bytecode { .. } => {
+            crate::rv_deep_zone!(Avm2CallSetup);
             // We must initialize the stack frame here so the lifetime works out
             let stack = activation.context.avm2.stack;
             let stack_frame = stack.get_stack_frame(method);
@@ -282,7 +284,17 @@ pub fn exec<'gc>(
 
             activation.context.avm2.push_call(mc, method);
 
-            let result = activation.run_actions(method);
+            // RuffleVita: run the AOT-compiled version if there is one for
+            // exactly this op stream (see avm2/aot.rs).
+            let result = match crate::avm2::aot::lookup(method) {
+                Some(compiled) => {
+                    crate::rv_deep_zone!(Avm2Aot);
+                    #[cfg(feature = "rv_prof_ops")]
+                    let _function = crate::rv_prof::enter_function(method.prof_id());
+                    compiled(&mut activation, &method.get_verified_info().parsed_code)
+                }
+                None => activation.run_actions(method),
+            };
 
             activation.cleanup();
 

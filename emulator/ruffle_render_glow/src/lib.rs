@@ -55,6 +55,10 @@ const COLOR_FRAGMENT_GLSL: &str = include_str!("../shaders/color.frag");
 const TEXTURE_VERTEX_GLSL: &str = include_str!("../shaders/texture.vert");
 const GRADIENT_FRAGMENT_GLSL: &str = include_str!("../shaders/gradient.frag");
 const BITMAP_FRAGMENT_GLSL: &str = include_str!("../shaders/bitmap.frag");
+const BATCH_VERTEX_GLSL: &str = include_str!("../shaders/batch.vert");
+const BATCH_BITMAP_VERTEX_GLSL: &str = include_str!("../shaders/batch_bitmap.vert");
+const BATCH_GRADIENT_VERTEX_GLSL: &str = include_str!("../shaders/batch_gradient.vert");
+const BATCH_GRADIENT_FRAGMENT_GLSL: &str = include_str!("../shaders/batch_gradient.frag");
 
 /// Translates a GLSL ES 1.00 shader into GLSL 1.50 when running on a desktop
 /// core-profile context (macOS only offers 3.2+ core). On GLES (vitaGL) the
@@ -130,6 +134,33 @@ fn log_large_texture(what: &str, width: u32, height: u32) {
     }
 }
 
+/// RuffleVita: solid-colour shape draws with at most this many vertices stay
+/// on the CPU and are drawn in batches (see `ColorBatch`); bigger ones keep
+/// their own GPU buffers, where one draw call costs less than transforming
+/// every vertex on the CPU each frame.
+const BATCHABLE_MAX_VERTICES: usize = 1024;
+/// A batch uses 16-bit indices.
+const BATCH_MAX_VERTICES: usize = u16::MAX as usize;
+
+/// RuffleVita: what the draw calls were, for tuning batching (timedemo).
+pub static RENDER_STATS: [AtomicU32; 11] = [const { AtomicU32::new(0) }; 11];
+pub const RENDER_STAT_NAMES: [&str; 11] = [
+    "colour batches",
+    "batched colour",
+    "big colour",
+    "gradient",
+    "big bitmap fill",
+    "bitmap batches",
+    "line",
+    "flush:mask",
+    "batched bitmap",
+    "gradient batches",
+    "batched gradient",
+];
+fn stat(i: usize) {
+    RENDER_STATS[i].fetch_add(1, Ordering::Relaxed);
+}
+
 /// Draw calls issued since the previous call, for the performance overlay.
 pub fn take_draw_calls() -> u32 {
     DRAW_CALLS.swap(0, Ordering::Relaxed)
@@ -181,6 +212,20 @@ pub struct GlowRenderBackend {
     color_program: ShaderProgram,
     bitmap_program: ShaderProgram,
     gradient_program: ShaderProgram,
+    batch_program: ShaderProgram,
+    bitmap_batch_program: ShaderProgram,
+    gradient_batch_program: ShaderProgram,
+
+    /// Solid-colour shapes waiting to be drawn in one call.
+    batch: ColorBatch,
+    /// Bitmap fills sharing a texture and colour transform, waiting likewise.
+    /// At most one of the two batches holds anything, to keep drawing order.
+    bitmap_batch: BitmapBatch,
+    gradient_batch: GradientBatch,
+    ramp_atlas: RampAtlas,
+    /// Batch small shapes (always on, except for A/B testing with
+    /// `RUFFLEVITA_NO_BATCH`).
+    batching: bool,
 
     shape_tessellator: ShapeTessellator,
 
@@ -284,11 +329,27 @@ impl GlowRenderBackend {
                 compile_shader(&gl, glow::FRAGMENT_SHADER, BITMAP_FRAGMENT_GLSL)?;
             let gradient_fragment =
                 compile_shader(&gl, glow::FRAGMENT_SHADER, GRADIENT_FRAGMENT_GLSL)?;
+            let batch_vertex = compile_shader(&gl, glow::VERTEX_SHADER, BATCH_VERTEX_GLSL)?;
+            let batch_bitmap_vertex =
+                compile_shader(&gl, glow::VERTEX_SHADER, BATCH_BITMAP_VERTEX_GLSL)?;
+            let batch_gradient_vertex =
+                compile_shader(&gl, glow::VERTEX_SHADER, BATCH_GRADIENT_VERTEX_GLSL)?;
+            let batch_gradient_fragment =
+                compile_shader(&gl, glow::FRAGMENT_SHADER, BATCH_GRADIENT_FRAGMENT_GLSL)?;
 
             let color_program = ShaderProgram::new(&gl, color_vertex, color_fragment)?;
             let bitmap_program = ShaderProgram::new(&gl, texture_vertex, bitmap_fragment)?;
             let gradient_program = ShaderProgram::new(&gl, texture_vertex, gradient_fragment)?;
+            let batch_program = ShaderProgram::new(&gl, batch_vertex, color_fragment)?;
+            let bitmap_batch_program =
+                ShaderProgram::new(&gl, batch_bitmap_vertex, bitmap_fragment)?;
+            let gradient_batch_program =
+                ShaderProgram::new(&gl, batch_gradient_vertex, batch_gradient_fragment)?;
             for shader in [
+                batch_vertex,
+                batch_bitmap_vertex,
+                batch_gradient_vertex,
+                batch_gradient_fragment,
                 color_vertex,
                 texture_vertex,
                 color_fragment,
@@ -299,6 +360,10 @@ impl GlowRenderBackend {
             }
 
             let offscreen_framebuffer = gl.create_framebuffer().map_err(Error::GlCreate)?;
+            let batch = ColorBatch::new(&gl, &batch_program)?;
+            let bitmap_batch = BitmapBatch::new(&gl, &bitmap_batch_program)?;
+            let gradient_batch = GradientBatch::new(&gl, &gradient_batch_program)?;
+            let ramp_atlas = RampAtlas::new(&gl)?;
 
             let mut renderer = Self {
                 gl,
@@ -310,6 +375,14 @@ impl GlowRenderBackend {
                 color_program,
                 gradient_program,
                 bitmap_program,
+                batch_program,
+                bitmap_batch_program,
+                gradient_batch_program,
+                batch,
+                bitmap_batch,
+                gradient_batch,
+                ramp_atlas,
+                batching: std::env::var_os("RUFFLEVITA_NO_BATCH").is_none(),
                 shape_tessellator: ShapeTessellator::new(),
                 color_quad_draws: vec![],
                 bitmap_quad_draws: vec![],
@@ -494,7 +567,7 @@ impl GlowRenderBackend {
         &mut self,
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
-    ) -> Result<Vec<Draw>, Error> {
+    ) -> Result<Vec<MeshDraw>, Error> {
         use ruffle_render::tessellator::DrawType as TessDrawType;
 
         let lyon_mesh = self.shape_tessellator.tessellate_shape(shape, bitmap_source);
@@ -503,6 +576,52 @@ impl GlowRenderBackend {
         for draw in lyon_mesh.draws {
             let num_indices = draw.indices.len() as i32;
             let num_mask_indices = draw.mask_index_count as i32;
+
+            if self.batching
+                && matches!(draw.draw_type, TessDrawType::Color)
+                && draw.vertices.len() <= BATCHABLE_MAX_VERTICES
+            {
+                draws.push(MeshDraw::Cpu(CpuDraw::new(
+                    draw.vertices.into_iter().map(Vertex::from).collect(),
+                    &draw.indices,
+                    draw.mask_index_count as usize,
+                )));
+                continue;
+            }
+            if let TessDrawType::Gradient { matrix, gradient } = &draw.draw_type {
+                if self.batching && draw.vertices.len() <= BATCHABLE_MAX_VERTICES {
+                    let tess_gradient = &lyon_mesh.gradients[*gradient];
+                    if let Some(row) = self.ramp_atlas.allocate(&ramp_pixels(tess_gradient)) {
+                        let (gradient_type, repeat_mode, focal_point) = gradient_params(tess_gradient);
+                        let v = (f32::from(row.row) + 0.5) / RAMP_ATLAS_ROWS as f32;
+                        draws.push(MeshDraw::CpuGradient(CpuGradientDraw {
+                            positions: draw.vertices.iter().map(|v| [v.x, v.y]).collect(),
+                            uvs: draw.vertices.iter().map(|v| apply_uv_matrix(matrix, v.x, v.y)).collect(),
+                            indices: draw.indices.iter().map(|&i| i as u16).collect(),
+                            num_mask_indices: draw.mask_index_count as usize,
+                            params: [v, gradient_type, repeat_mode, focal_point],
+                            _row: row,
+                        }));
+                        continue;
+                    }
+                }
+            }
+            if let TessDrawType::Bitmap(bitmap) = &draw.draw_type {
+                if self.batching && draw.vertices.len() <= BATCHABLE_MAX_VERTICES {
+                    // The shader's `u_matrix * vec3(position, 1.0)`, done once here.
+                    let uv = |x: f32, y: f32| apply_uv_matrix(&bitmap.matrix, x, y);
+                    draws.push(MeshDraw::CpuBitmap(CpuBitmapDraw {
+                        positions: draw.vertices.iter().map(|v| [v.x, v.y]).collect(),
+                        uvs: draw.vertices.iter().map(|v| uv(v.x, v.y)).collect(),
+                        indices: draw.indices.iter().map(|&i| i as u16).collect(),
+                        num_mask_indices: draw.mask_index_count as usize,
+                        handle: bitmap_source.bitmap_handle(bitmap.bitmap_id, self),
+                        is_smoothed: bitmap.is_smoothed,
+                        is_repeating: bitmap.is_repeating,
+                    }));
+                    continue;
+                }
+            }
 
             unsafe {
                 let vao = self.gl.create_vertex_array().map_err(Error::GlCreate)?;
@@ -548,18 +667,197 @@ impl GlowRenderBackend {
                     }),
                 };
 
-                draws.push(Draw {
+                draws.push(MeshDraw::Gpu(Draw {
                     draw_type,
                     vao,
                     vertex_buffer: Buffer { gl: self.gl.clone(), buffer: vertex_buffer },
                     index_buffer: Buffer { gl: self.gl.clone(), buffer: index_buffer },
                     num_indices,
                     num_mask_indices,
-                });
+                }));
             }
         }
 
         Ok(draws)
+    }
+
+    /// Draws the pending batch, if any, with the state that was current
+    /// when its shapes were added. Every state change calls this first.
+    fn flush_batch(&mut self) {
+        self.flush_color_batch();
+        self.flush_bitmap_batch();
+        self.flush_gradient_batch();
+    }
+
+    fn flush_gradient_batch(&mut self) {
+        if self.gradient_batch.indices.is_empty() {
+            return;
+        }
+        let _zone = rv_prof::zone(rv_prof::Zone::GlFlush);
+        let (mult, add) = self.gradient_batch.state.take().expect("a non-empty gradient batch has a colour transform");
+        self.use_program(ProgramKind::GradientBatch);
+        let program = &self.gradient_batch_program;
+        if Some(mult) != self.mult_color {
+            program.uniform4fv(&self.gl, ShaderUniform::MultColor, &mult);
+            self.mult_color = Some(mult);
+        }
+        if Some(add) != self.add_color {
+            program.uniform4fv(&self.gl, ShaderUniform::AddColor, &add);
+            self.add_color = Some(add);
+        }
+        let batch = &mut self.gradient_batch;
+        unsafe {
+            let gl = &self.gl;
+            self.ramp_atlas.bind(gl);
+            gl.bind_vertex_array(Some(batch.vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(batch.vertex_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.vertices),
+                glow::STREAM_DRAW,
+            );
+            self.gradient_batch_program.bind_gradient_layout(gl);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(batch.index_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.indices),
+                glow::STREAM_DRAW,
+            );
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
+            stat(9);
+            gl.draw_elements(glow::TRIANGLES, batch.indices.len() as i32, glow::UNSIGNED_SHORT, 0);
+        }
+        batch.vertices.clear();
+        batch.indices.clear();
+    }
+
+    /// Gets the gradient batch ready for `vertices` more vertices drawn with
+    /// this colour transform.
+    fn begin_gradient_batch(&mut self, mult: [f32; 4], add: [f32; 4], vertices: usize) {
+        self.flush_color_batch();
+        self.flush_bitmap_batch();
+        let same = self.gradient_batch.state == Some((mult, add));
+        if !same || self.gradient_batch.vertices.len() + vertices > BATCH_MAX_VERTICES {
+            self.flush_gradient_batch();
+        }
+        self.gradient_batch.state = Some((mult, add));
+    }
+
+    fn flush_color_batch(&mut self) {
+        if self.batch.indices.is_empty() {
+            return;
+        }
+        let _zone = rv_prof::zone(rv_prof::Zone::GlFlush);
+        self.use_program(ProgramKind::Batch);
+        let batch = &mut self.batch;
+        unsafe {
+            let gl = &self.gl;
+            gl.bind_vertex_array(Some(batch.vao));
+            // Respecify ("orphan") the buffers each time, so the driver hands
+            // out fresh memory instead of waiting for the GPU to finish with
+            // the previous batch.
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(batch.vertex_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.vertices),
+                glow::STREAM_DRAW,
+            );
+            // vitaGL may resolve attribute addresses when they're set, so set
+            // them again for the new storage.
+            self.batch_program.bind_vertex_layout(gl);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(batch.index_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.indices),
+                glow::STREAM_DRAW,
+            );
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
+            stat(0);
+            gl.draw_elements(glow::TRIANGLES, batch.indices.len() as i32, glow::UNSIGNED_SHORT, 0);
+        }
+        batch.vertices.clear();
+        batch.indices.clear();
+    }
+
+    fn flush_bitmap_batch(&mut self) {
+        if self.bitmap_batch.indices.is_empty() {
+            return;
+        }
+        let _zone = rv_prof::zone(rv_prof::Zone::GlFlush);
+        let state = self.bitmap_batch.state.take().expect("a non-empty bitmap batch has a texture");
+        self.use_program(ProgramKind::BitmapBatch);
+        let program = &self.bitmap_batch_program;
+        if Some(state.mult) != self.mult_color {
+            program.uniform4fv(&self.gl, ShaderUniform::MultColor, &state.mult);
+            self.mult_color = Some(state.mult);
+        }
+        if Some(state.add) != self.add_color {
+            program.uniform4fv(&self.gl, ShaderUniform::AddColor, &state.add);
+            self.add_color = Some(state.add);
+        }
+        program.uniform1f(&self.gl, ShaderUniform::Repeat, if state.repeat { 1.0 } else { 0.0 });
+        as_registry_data(&state.handle).bind(&self.gl, state.filter, glow::CLAMP_TO_EDGE);
+        let batch = &mut self.bitmap_batch;
+        unsafe {
+            let gl = &self.gl;
+            gl.bind_vertex_array(Some(batch.vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(batch.vertex_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.vertices),
+                glow::STREAM_DRAW,
+            );
+            self.bitmap_batch_program.bind_uv_layout(gl);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(batch.index_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ELEMENT_ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.indices),
+                glow::STREAM_DRAW,
+            );
+            DRAW_CALLS.fetch_add(1, Ordering::Relaxed);
+            stat(5);
+            gl.draw_elements(glow::TRIANGLES, batch.indices.len() as i32, glow::UNSIGNED_SHORT, 0);
+        }
+        batch.vertices.clear();
+        batch.indices.clear();
+    }
+
+    /// Gets the colour batch ready for `vertices` more vertices.
+    fn begin_color_batch(&mut self, vertices: usize) {
+        self.flush_bitmap_batch();
+        self.flush_gradient_batch();
+        if self.batch.vertices.len() + vertices > BATCH_MAX_VERTICES {
+            self.flush_color_batch();
+        }
+    }
+
+    /// Gets the bitmap batch ready for `vertices` more vertices drawn with
+    /// this texture, sampling and colour transform.
+    fn begin_bitmap_batch(
+        &mut self,
+        handle: &BitmapHandle,
+        filter: u32,
+        repeat: bool,
+        mult: [f32; 4],
+        add: [f32; 4],
+        vertices: usize,
+    ) {
+        self.flush_color_batch();
+        self.flush_gradient_batch();
+        let same = self.bitmap_batch.state.as_ref().is_some_and(|s| {
+            std::ptr::addr_eq(Arc::as_ptr(&s.handle.0), Arc::as_ptr(&handle.0))
+                && s.filter == filter
+                && s.repeat == repeat
+                && s.mult == mult
+                && s.add == add
+        });
+        if !same || self.bitmap_batch.vertices.len() + vertices > BATCH_MAX_VERTICES {
+            self.flush_bitmap_batch();
+        }
+        if self.bitmap_batch.state.is_none() {
+            self.bitmap_batch.state =
+                Some(BitmapBatchState { handle: handle.clone(), filter, repeat, mult, add });
+        }
     }
 
     /// Downscales bitmaps that exceed the GPU's maximum texture size.
@@ -600,6 +898,10 @@ impl GlowRenderBackend {
         if !self.mask_state_dirty {
             return;
         }
+        if !self.batch.indices.is_empty() {
+            stat(7);
+        }
+        self.flush_batch();
         self.mask_state_dirty = false;
         unsafe {
             match self.mask_state {
@@ -698,6 +1000,7 @@ impl GlowRenderBackend {
     /// Resets every piece of GL state this renderer depends on and forgets
     /// cached state, so anything drawn in between frames can't leak in.
     fn reset_gl_state(&mut self) {
+        self.flush_batch();
         self.active_program = std::ptr::null();
         self.mask_state = MaskState::NoMask;
         self.num_masks = 0;
@@ -932,11 +1235,13 @@ impl GlowRenderBackend {
         self.reset_gl_state();
         self.set_stencil_state();
         commands.execute(self);
+        self.flush_batch();
     }
 
     /// Copies the `w` x `h` area of `entry` at `x`, `y` to the bound
     /// framebuffer's viewport, replacing its contents.
     fn blit_texture_tile(&mut self, entry: &RegistryData, x: u32, y: u32, w: u32, h: u32) {
+        self.flush_batch();
         let (tw, th) = (entry.width.max(1) as f32, entry.height.max(1) as f32);
         unsafe {
             let gl = &self.gl;
@@ -1012,6 +1317,7 @@ impl GlowRenderBackend {
     }
 
     fn end_frame(&mut self) {
+        self.flush_batch();
         unsafe {
             self.gl.disable(glow::STENCIL_TEST);
             self.gl.color_mask(true, true, true, true);
@@ -1083,6 +1389,7 @@ impl GlowRenderBackend {
 
     fn push_blend_mode(&mut self, blend: RenderBlendMode) {
         if !same_blend_mode(self.blend_modes.last(), &blend) {
+            self.flush_batch();
             self.apply_blend_mode(&blend);
         }
         self.blend_modes.push(blend);
@@ -1092,16 +1399,28 @@ impl GlowRenderBackend {
         let old = self.blend_modes.pop();
         let current = self.current_blend_mode();
         if !same_blend_mode(old.as_ref(), &current) {
+            self.flush_batch();
             self.apply_blend_mode(&current);
         }
     }
 
     /// Switches programs if needed, invalidating the cached uniforms.
     fn use_program(&mut self, which: ProgramKind) {
+        // Anything but the batch program is about to draw on its own: the
+        // batched shapes come first.
+        if !matches!(
+            which,
+            ProgramKind::Batch | ProgramKind::BitmapBatch | ProgramKind::GradientBatch
+        ) {
+            self.flush_batch();
+        }
         let program = match which {
             ProgramKind::Color => &self.color_program,
             ProgramKind::Bitmap => &self.bitmap_program,
             ProgramKind::Gradient => &self.gradient_program,
+            ProgramKind::Batch => &self.batch_program,
+            ProgramKind::BitmapBatch => &self.bitmap_batch_program,
+            ProgramKind::GradientBatch => &self.gradient_batch_program,
         };
         if std::ptr::eq(program, self.active_program) {
             return;
@@ -1131,6 +1450,18 @@ impl GlowRenderBackend {
     }
 
     fn draw_quad<const MODE: u32, const COUNT: i32>(&mut self, color: Color, matrix: Matrix) {
+        // Filled rectangles join the batch; lines need their own primitive.
+        if MODE == glow::TRIANGLE_FAN && self.batching {
+            self.set_stencil_state();
+            let color = premultiply(u32::from_le_bytes([color.r, color.g, color.b, color.a]));
+            if self.gradient_batch.open_for(4) {
+                self.gradient_batch.append_rect(&matrix, color);
+            } else {
+                self.begin_color_batch(4);
+                self.batch.append_rect(&matrix, color);
+            }
+            return;
+        }
         let world_matrix = world_matrix(&matrix);
         let mult_color = [
             color.r as f32 / 255.0,
@@ -1139,6 +1470,7 @@ impl GlowRenderBackend {
             color.a as f32 / 255.0,
         ];
 
+        stat(6);
         self.set_stencil_state();
         self.use_program(ProgramKind::Color);
         self.set_color_uniforms(&world_matrix, mult_color, [0.0; 4]);
@@ -1166,11 +1498,14 @@ fn tiles(region: PixelRegion) -> impl Iterator<Item = (u32, u32, u32, u32)> {
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ProgramKind {
     Color,
     Bitmap,
     Gradient,
+    Batch,
+    BitmapBatch,
+    GradientBatch,
 }
 
 fn world_matrix(matrix: &Matrix) -> [[f32; 4]; 4] {
@@ -1204,6 +1539,7 @@ impl RenderBackend for GlowRenderBackend {
         _quality: StageQuality,
         bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
+        self.flush_batch();
         let entry = as_registry_data(&handle);
         let (width, height) = (entry.width, entry.height);
         log_large_texture("Drawing into", width, height);
@@ -1249,6 +1585,7 @@ impl RenderBackend for GlowRenderBackend {
     }
 
     fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
+        self.flush_batch();
         self.view_matrix = [
             [1.0 / (dimensions.width as f32 / 2.0), 0.0, 0.0, 0.0],
             [0.0, -1.0 / (dimensions.height as f32 / 2.0), 0.0, 0.0],
@@ -1552,10 +1889,18 @@ impl CommandHandler for GlowRenderBackend {
         let mut matrix = transform.matrix;
         pixel_snapping.apply(&mut matrix);
         matrix *= Matrix::scale(entry.width as f32, entry.height as f32);
-        let world_matrix = world_matrix(&matrix);
 
         let mult_color = transform.color_transform.mult_rgba_normalized();
         let add_color = transform.color_transform.add_rgba_normalized();
+
+        if self.batching {
+            let filter = if smoothing { glow::LINEAR } else { glow::NEAREST };
+            self.begin_bitmap_batch(&bitmap, filter, false, mult_color, add_color, 4);
+            self.bitmap_batch.append_quad(&matrix);
+            stat(8);
+            return;
+        }
+        let world_matrix = world_matrix(&matrix);
 
         self.use_program(ProgramKind::Bitmap);
         self.set_color_uniforms(&world_matrix, mult_color, add_color);
@@ -1587,7 +1932,57 @@ impl CommandHandler for GlowRenderBackend {
             || self.mask_state == MaskState::ClearMaskStencil;
 
         let mesh = as_mesh(&shape);
+        let mut color: Option<ColorTransformer> = None;
         for draw in &mesh.draws {
+            let draw = match draw {
+                MeshDraw::Cpu(cpu) => {
+                    // Ignore strokes when drawing a mask stencil.
+                    let count = if drawing_stencil { cpu.num_mask_indices } else { cpu.indices.len() };
+                    if count > 0 {
+                        let color = color
+                            .get_or_insert_with(|| ColorTransformer::new(mult_color, add_color));
+                        if self.gradient_batch.open_for(cpu.positions.len()) {
+                            self.gradient_batch.append_color(cpu, count, &transform.matrix, color);
+                        } else {
+                            self.begin_color_batch(cpu.positions.len());
+                            self.batch.append(cpu, count, &transform.matrix, color);
+                        }
+                        stat(1);
+                    }
+                    continue;
+                }
+                MeshDraw::CpuBitmap(cpu) => {
+                    let count = if drawing_stencil { cpu.num_mask_indices } else { cpu.indices.len() };
+                    let Some(handle) = &cpu.handle else {
+                        log::warn!("Tried to render a handleless bitmap");
+                        continue;
+                    };
+                    if count > 0 {
+                        let filter = if cpu.is_smoothed { glow::LINEAR } else { glow::NEAREST };
+                        self.begin_bitmap_batch(
+                            handle,
+                            filter,
+                            cpu.is_repeating,
+                            mult_color,
+                            add_color,
+                            cpu.positions.len(),
+                        );
+                        self.bitmap_batch.append(cpu, count, &transform.matrix);
+                        stat(8);
+                    }
+                    continue;
+                }
+                MeshDraw::CpuGradient(cpu) => {
+                    let count = if drawing_stencil { cpu.num_mask_indices } else { cpu.indices.len() };
+                    if count > 0 {
+                        self.begin_gradient_batch(mult_color, add_color, cpu.positions.len());
+                        self.gradient_batch.append(cpu, count, &transform.matrix);
+                        stat(10);
+                    }
+                    continue;
+                }
+                MeshDraw::Gpu(draw) => draw,
+            };
             // Ignore strokes when drawing a mask stencil.
             let num_indices = if drawing_stencil {
                 draw.num_mask_indices
@@ -1598,6 +1993,12 @@ impl CommandHandler for GlowRenderBackend {
                 continue;
             }
 
+            let _zone = rv_prof::zone(rv_prof::Zone::GlDraw);
+            stat(match &draw.draw_type {
+                DrawType::Color => 2,
+                DrawType::Gradient(_) => 3,
+                DrawType::Bitmap(_) => 4,
+            });
             let kind = match &draw.draw_type {
                 DrawType::Color => ProgramKind::Color,
                 DrawType::Gradient(_) => ProgramKind::Gradient,
@@ -1722,58 +2123,80 @@ struct Gradient {
 
 const RAMP_SIZE: usize = 256;
 
+/// The colour ramp of `gradient` as `RAMP_SIZE` straight (not premultiplied)
+/// RGBA8 texels; the shader applies the colour transform and premultiplies.
+fn ramp_pixels(gradient: &TessGradient) -> Vec<u8> {
+    let linear = gradient.interpolation == swf::GradientInterpolation::LinearRgb;
+    let stops: Vec<(f32, [f32; 4])> = gradient
+        .records
+        .iter()
+        .map(|r| {
+            let mut c = [
+                f32::from(r.color.r) / 255.0,
+                f32::from(r.color.g) / 255.0,
+                f32::from(r.color.b) / 255.0,
+                f32::from(r.color.a) / 255.0,
+            ];
+            if linear {
+                srgb_to_linear(&mut c);
+            }
+            (f32::from(r.ratio) / 255.0, c)
+        })
+        .collect();
+
+    let mut pixels = vec![0u8; RAMP_SIZE * 4];
+    for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+        let t = i as f32 / (RAMP_SIZE - 1) as f32;
+        let mut c = match stops.as_slice() {
+            [] => [0.0; 4],
+            [only] => only.1,
+            _ => {
+                let first = stops[0];
+                let last = stops[stops.len() - 1];
+                if t <= first.0 {
+                    first.1
+                } else if t >= last.0 {
+                    last.1
+                } else {
+                    let k = stops.windows(2).position(|w| t <= w[1].0).unwrap_or(0);
+                    let (r0, c0) = stops[k];
+                    let (r1, c1) = stops[k + 1];
+                    let f = if r1 > r0 { (t - r0) / (r1 - r0) } else { 0.0 };
+                    [0, 1, 2, 3].map(|j| c0[j] + (c1[j] - c0[j]) * f)
+                }
+            }
+        };
+        if linear {
+            linear_to_srgb(&mut c);
+        }
+        for j in 0..4 {
+            px[j] = (c[j].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+    }
+    pixels
+}
+
+/// (type, repeat mode, focal point) as the gradient shaders take them.
+fn gradient_params(gradient: &TessGradient) -> (f32, f32, f32) {
+    (
+        match gradient.gradient_type {
+            GradientType::Linear => 0.0,
+            GradientType::Radial => 1.0,
+            GradientType::Focal => 2.0,
+        },
+        match gradient.repeat_mode {
+            swf::GradientSpread::Pad => 0.0,
+            swf::GradientSpread::Repeat => 1.0,
+            swf::GradientSpread::Reflect => 2.0,
+        },
+        gradient.focal_point.to_f32().clamp(-0.98, 0.98),
+    )
+}
+
 impl Gradient {
     fn new(gl: Arc<glow::Context>, gradient: TessGradient, matrix: [[f32; 3]; 3]) -> Result<Self, Error> {
-        let linear = gradient.interpolation == swf::GradientInterpolation::LinearRgb;
-        let stops: Vec<(f32, [f32; 4])> = gradient
-            .records
-            .iter()
-            .map(|r| {
-                let mut c = [
-                    f32::from(r.color.r) / 255.0,
-                    f32::from(r.color.g) / 255.0,
-                    f32::from(r.color.b) / 255.0,
-                    f32::from(r.color.a) / 255.0,
-                ];
-                if linear {
-                    srgb_to_linear(&mut c);
-                }
-                (f32::from(r.ratio) / 255.0, c)
-            })
-            .collect();
-
-        // Straight (non-premultiplied) colours; the shader applies the colour
-        // transform and premultiplies.
-        let mut pixels = vec![0u8; RAMP_SIZE * 4];
-        for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
-            let t = i as f32 / (RAMP_SIZE - 1) as f32;
-            let mut c = match stops.as_slice() {
-                [] => [0.0; 4],
-                [only] => only.1,
-                _ => {
-                    let first = stops[0];
-                    let last = stops[stops.len() - 1];
-                    if t <= first.0 {
-                        first.1
-                    } else if t >= last.0 {
-                        last.1
-                    } else {
-                        let k = stops.windows(2).position(|w| t <= w[1].0).unwrap_or(0);
-                        let (r0, c0) = stops[k];
-                        let (r1, c1) = stops[k + 1];
-                        let f = if r1 > r0 { (t - r0) / (r1 - r0) } else { 0.0 };
-                        [0, 1, 2, 3].map(|j| c0[j] + (c1[j] - c0[j]) * f)
-                    }
-                }
-            };
-            if linear {
-                linear_to_srgb(&mut c);
-            }
-            for j in 0..4 {
-                px[j] = (c[j].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            }
-        }
-
+        let pixels = ramp_pixels(&gradient);
+        let (gradient_type, repeat_mode, focal_point) = gradient_params(&gradient);
         let ramp = unsafe {
             let tex = gl.create_texture().map_err(Error::GlCreate)?;
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -1799,22 +2222,7 @@ impl Gradient {
             tex
         };
 
-        Ok(Self {
-            gl,
-            matrix,
-            gradient_type: match gradient.gradient_type {
-                GradientType::Linear => 0.0,
-                GradientType::Radial => 1.0,
-                GradientType::Focal => 2.0,
-            },
-            repeat_mode: match gradient.repeat_mode {
-                swf::GradientSpread::Pad => 0.0,
-                swf::GradientSpread::Repeat => 1.0,
-                swf::GradientSpread::Reflect => 2.0,
-            },
-            focal_point: gradient.focal_point.to_f32().clamp(-0.98, 0.98),
-            ramp,
-        })
+        Ok(Self { gl, matrix, gradient_type, repeat_mode, focal_point, ramp })
     }
 }
 
@@ -1835,14 +2243,16 @@ struct BitmapDraw {
 #[derive(Debug)]
 struct Mesh {
     gl: Arc<glow::Context>,
-    draws: Vec<Draw>,
+    draws: Vec<MeshDraw>,
 }
 
 impl Drop for Mesh {
     fn drop(&mut self) {
         unsafe {
             for draw in &self.draws {
-                self.gl.delete_vertex_array(draw.vao);
+                if let MeshDraw::Gpu(draw) = draw {
+                    self.gl.delete_vertex_array(draw.vao);
+                }
             }
         }
     }
@@ -1880,6 +2290,510 @@ struct Draw {
     num_mask_indices: i32,
 }
 
+/// One draw of a registered shape: its own GPU buffers, or (small solid
+/// colour draws) CPU data that goes through `ColorBatch`.
+#[derive(Debug)]
+enum MeshDraw {
+    Gpu(Draw),
+    Cpu(CpuDraw),
+    CpuBitmap(CpuBitmapDraw),
+    CpuGradient(CpuGradientDraw),
+}
+
+/// Rows in the gradient ramp atlas (512 KiB). Fills with the same ramp share
+/// a row; a row is free again once no shape uses it.
+const RAMP_ATLAS_ROWS: usize = 512;
+
+/// One texture holding many gradient ramps, a row each, so that gradient
+/// fills can be batched.
+struct RampAtlas {
+    texture: glow::Texture,
+    /// A CPU copy: new ramps go here, and the changed rows are uploaded in
+    /// one go before the atlas is next drawn with. Writing into a texture the
+    /// GPU used recently makes vitaGL copy all of it, so once per frame at
+    /// most, however many gradients a game creates.
+    pixels: Vec<u8>,
+    dirty: Option<(usize, usize)>,
+    rows: Arc<std::sync::Mutex<RampRows>>,
+}
+
+/// Who uses which atlas row.
+struct RampRows {
+    free: Vec<u16>,
+    refs: Vec<u32>,
+    /// Row by ramp hash, to share rows between identical ramps.
+    by_hash: std::collections::HashMap<u64, u16>,
+    hash: Vec<u64>,
+}
+
+impl RampAtlas {
+    fn new(gl: &glow::Context) -> Result<Self, Error> {
+        unsafe {
+            let texture = gl.create_texture().map_err(Error::GlCreate)?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            for (p, v) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
+            }
+            let pixels = vec![0u8; RAMP_SIZE * RAMP_ATLAS_ROWS * 4];
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA as i32,
+                RAMP_SIZE as i32,
+                RAMP_ATLAS_ROWS as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&pixels)),
+            );
+            Ok(Self {
+                texture,
+                pixels,
+                dirty: None,
+                rows: Arc::new(std::sync::Mutex::new(RampRows {
+                    free: (0..RAMP_ATLAS_ROWS as u16).rev().collect(),
+                    refs: vec![0; RAMP_ATLAS_ROWS],
+                    by_hash: Default::default(),
+                    hash: vec![0; RAMP_ATLAS_ROWS],
+                })),
+            })
+        }
+    }
+
+    /// A row holding this ramp: a shared one if it's already there, else a
+    /// free one, if any is left.
+    fn allocate(&mut self, pixels: &[u8]) -> Option<RampRow> {
+        use std::hash::{Hash, Hasher};
+        let stride = RAMP_SIZE * 4;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pixels.hash(&mut hasher);
+        let hash = hasher.finish();
+        let mut rows = self.rows.lock().ok()?;
+        if let Some(&row) = rows.by_hash.get(&hash) {
+            let r = usize::from(row);
+            if self.pixels[r * stride..(r + 1) * stride] == *pixels {
+                rows.refs[r] += 1;
+                return Some(RampRow { row, rows: self.rows.clone() });
+            }
+        }
+        let row = rows.free.pop()?;
+        let r = usize::from(row);
+        rows.refs[r] = 1;
+        rows.hash[r] = hash;
+        rows.by_hash.insert(hash, row);
+        drop(rows);
+        self.pixels[r * stride..(r + 1) * stride].copy_from_slice(pixels);
+        self.dirty = Some(match self.dirty {
+            Some((first, last)) => (first.min(r), last.max(r)),
+            None => (r, r),
+        });
+        Some(RampRow { row, rows: self.rows.clone() })
+    }
+
+    /// Binds the atlas to unit 0, uploading rows that changed.
+    fn bind(&mut self, gl: &glow::Context) {
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            if let Some((first, last)) = self.dirty.take() {
+                let stride = RAMP_SIZE * 4;
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    first as i32,
+                    RAMP_SIZE as i32,
+                    (last - first + 1) as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&self.pixels[first * stride..(last + 1) * stride])),
+                );
+            }
+        }
+    }
+}
+
+/// A row of the ramp atlas, given back when its shape goes away.
+struct RampRow {
+    row: u16,
+    rows: Arc<std::sync::Mutex<RampRows>>,
+}
+
+impl std::fmt::Debug for RampRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RampRow({})", self.row)
+    }
+}
+
+impl Drop for RampRow {
+    fn drop(&mut self) {
+        if let Ok(mut rows) = self.rows.lock() {
+            let r = usize::from(self.row);
+            rows.refs[r] -= 1;
+            if rows.refs[r] == 0 {
+                let hash = rows.hash[r];
+                if rows.by_hash.get(&hash) == Some(&self.row) {
+                    rows.by_hash.remove(&hash);
+                }
+                rows.free.push(self.row);
+            }
+        }
+    }
+}
+
+/// A gradient fill kept on the CPU for batching.
+#[derive(Debug)]
+struct CpuGradientDraw {
+    positions: Box<[[f32; 2]]>,
+    /// In gradient space (the shader's `u_matrix * position`).
+    uvs: Box<[[f32; 2]]>,
+    indices: Box<[u16]>,
+    num_mask_indices: usize,
+    /// Atlas row v, type, repeat mode, focal point.
+    params: [f32; 4],
+    _row: RampRow,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct GradientVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+    params: [f32; 4],
+    /// Premultiplied colour, for solid shapes (params type 3).
+    color: u32,
+}
+
+/// `GradientVertex::params` of a solid-colour shape in a gradient batch.
+const SOLID_IN_GRADIENT_BATCH: [f32; 4] = [0.0, 3.0, 0.0, 0.0];
+
+/// Gradient fills sharing a colour transform, in stage pixels, drawn with
+/// one call from the ramp atlas.
+struct GradientBatch {
+    vertices: Vec<GradientVertex>,
+    indices: Vec<u16>,
+    /// The shared colour transform (mult, add).
+    state: Option<([f32; 4], [f32; 4])>,
+    vao: glow::VertexArray,
+    vertex_buffer: glow::Buffer,
+    index_buffer: glow::Buffer,
+}
+
+impl GradientBatch {
+    fn new(gl: &glow::Context, program: &ShaderProgram) -> Result<Self, Error> {
+        unsafe {
+            let vao = gl.create_vertex_array().map_err(Error::GlCreate)?;
+            let vertex_buffer = gl.create_buffer().map_err(Error::GlCreate)?;
+            let index_buffer = gl.create_buffer().map_err(Error::GlCreate)?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertex_buffer));
+            program.bind_gradient_layout(gl);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(index_buffer));
+            gl.bind_vertex_array(None);
+            Ok(Self {
+                vertices: Vec::with_capacity(4096),
+                indices: Vec::with_capacity(8192),
+                state: None,
+                vao,
+                vertex_buffer,
+                index_buffer,
+            })
+        }
+    }
+
+    fn append(&mut self, draw: &CpuGradientDraw, count: usize, matrix: &Matrix) {
+        let base = self.vertices.len() as u16;
+        let (a, b, c, d) = (matrix.a, matrix.b, matrix.c, matrix.d);
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        let params = draw.params;
+        self.vertices.extend(draw.positions.iter().zip(draw.uvs.iter()).map(|(p, &uv)| {
+            GradientVertex {
+                position: [a * p[0] + c * p[1] + tx, b * p[0] + d * p[1] + ty],
+                uv,
+                params,
+                color: 0,
+            }
+        }));
+        self.indices.extend(draw.indices[..count].iter().map(|&i| i + base));
+    }
+
+    /// Adds a solid-colour draw, so that fills alternating between gradients
+    /// and colours (typical vector art) stay in one batch.
+    fn append_color(
+        &mut self,
+        draw: &CpuDraw,
+        count: usize,
+        matrix: &Matrix,
+        color: &mut ColorTransformer,
+    ) {
+        let base = self.vertices.len() as u16;
+        let (a, b, c, d) = (matrix.a, matrix.b, matrix.c, matrix.d);
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        for (i, p) in draw.positions.iter().enumerate() {
+            let rgba = if color.identity { draw.premultiplied[i] } else { color.apply(draw.colors[i]) };
+            self.vertices.push(GradientVertex {
+                position: [a * p[0] + c * p[1] + tx, b * p[0] + d * p[1] + ty],
+                uv: [0.0; 2],
+                params: SOLID_IN_GRADIENT_BATCH,
+                color: rgba,
+            });
+        }
+        self.indices.extend(draw.indices[..count].iter().map(|&i| i + base));
+    }
+
+    fn append_rect(&mut self, matrix: &Matrix, color: u32) {
+        let base = self.vertices.len() as u16;
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            self.vertices.push(GradientVertex {
+                position: [matrix.a * x + matrix.c * y + tx, matrix.b * x + matrix.d * y + ty],
+                uv: [0.0; 2],
+                params: SOLID_IN_GRADIENT_BATCH,
+                color,
+            });
+        }
+        self.indices.extend([0, 1, 2, 0, 2, 3].map(|i| i + base));
+    }
+
+    /// Whether a solid shape of `vertices` vertices can join this batch now.
+    fn open_for(&self, vertices: usize) -> bool {
+        !self.indices.is_empty() && self.vertices.len() + vertices <= BATCH_MAX_VERTICES
+    }
+}
+
+/// `matrix * vec3(x, y, 1)` for a column-major 3x3 matrix, as in the shaders.
+fn apply_uv_matrix(m: &[[f32; 3]; 3], x: f32, y: f32) -> [f32; 2] {
+    [m[0][0] * x + m[1][0] * y + m[2][0], m[0][1] * x + m[1][1] * y + m[2][1]]
+}
+
+/// A bitmap fill kept on the CPU for batching, with its UVs worked out.
+#[derive(Debug)]
+struct CpuBitmapDraw {
+    positions: Box<[[f32; 2]]>,
+    uvs: Box<[[f32; 2]]>,
+    indices: Box<[u16]>,
+    num_mask_indices: usize,
+    handle: Option<BitmapHandle>,
+    is_smoothed: bool,
+    is_repeating: bool,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct UvVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+}
+
+/// What every shape in a `BitmapBatch` shares.
+struct BitmapBatchState {
+    handle: BitmapHandle,
+    filter: u32,
+    repeat: bool,
+    mult: [f32; 4],
+    add: [f32; 4],
+}
+
+/// Bitmap fills (and Bitmap objects) with the same texture, sampling and
+/// colour transform, in stage pixels, drawn with one call.
+struct BitmapBatch {
+    vertices: Vec<UvVertex>,
+    indices: Vec<u16>,
+    state: Option<BitmapBatchState>,
+    vao: glow::VertexArray,
+    vertex_buffer: glow::Buffer,
+    index_buffer: glow::Buffer,
+}
+
+impl BitmapBatch {
+    fn new(gl: &glow::Context, program: &ShaderProgram) -> Result<Self, Error> {
+        unsafe {
+            let vao = gl.create_vertex_array().map_err(Error::GlCreate)?;
+            let vertex_buffer = gl.create_buffer().map_err(Error::GlCreate)?;
+            let index_buffer = gl.create_buffer().map_err(Error::GlCreate)?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertex_buffer));
+            program.bind_uv_layout(gl);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(index_buffer));
+            gl.bind_vertex_array(None);
+            Ok(Self {
+                vertices: Vec::with_capacity(4096),
+                indices: Vec::with_capacity(8192),
+                state: None,
+                vao,
+                vertex_buffer,
+                index_buffer,
+            })
+        }
+    }
+
+    fn append(&mut self, draw: &CpuBitmapDraw, count: usize, matrix: &Matrix) {
+        let base = self.vertices.len() as u16;
+        let (a, b, c, d) = (matrix.a, matrix.b, matrix.c, matrix.d);
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        self.vertices.extend(draw.positions.iter().zip(draw.uvs.iter()).map(|(p, &uv)| UvVertex {
+            position: [a * p[0] + c * p[1] + tx, b * p[0] + d * p[1] + ty],
+            uv,
+        }));
+        self.indices.extend(draw.indices[..count].iter().map(|&i| i + base));
+    }
+
+    /// The whole texture on the unit square under `matrix`.
+    fn append_quad(&mut self, matrix: &Matrix) {
+        let base = self.vertices.len() as u16;
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            self.vertices.push(UvVertex {
+                position: [matrix.a * x + matrix.c * y + tx, matrix.b * x + matrix.d * y + ty],
+                uv: [x, y],
+            });
+        }
+        self.indices.extend([0, 1, 2, 0, 2, 3].map(|i| i + base));
+    }
+}
+
+/// A solid-colour draw kept on the CPU for batching.
+#[derive(Debug)]
+struct CpuDraw {
+    /// In shape space.
+    positions: Box<[[f32; 2]]>,
+    /// Straight RGBA, as the tessellator made them.
+    colors: Box<[u32]>,
+    /// `colors` premultiplied: the result of an identity colour transform.
+    premultiplied: Box<[u32]>,
+    /// Fills first, then strokes.
+    indices: Box<[u16]>,
+    /// Masks draw only the fills: this many indices.
+    num_mask_indices: usize,
+}
+
+impl CpuDraw {
+    fn new(vertices: Vec<Vertex>, indices: &[u32], num_mask_indices: usize) -> Self {
+        let colors: Box<[u32]> = vertices.iter().map(|v| v.color).collect();
+        Self {
+            positions: vertices.iter().map(|v| v.position).collect(),
+            premultiplied: colors.iter().map(|&c| premultiply(c)).collect(),
+            colors,
+            indices: indices.iter().map(|&i| i as u16).collect(),
+            num_mask_indices,
+        }
+    }
+}
+
+/// Straight RGBA8 to premultiplied, rounded like the GPU's 8-bit output.
+fn premultiply(color: u32) -> u32 {
+    let [r, g, b, a] = color.to_le_bytes();
+    let mul = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
+    u32::from_le_bytes([mul(r), mul(g), mul(b), a])
+}
+
+/// Applies a colour transform on the CPU exactly like `color.vert`:
+/// `clamp(color * mult + add)`, then premultiplies. Shapes use few distinct
+/// colours, so the last result is cached.
+struct ColorTransformer {
+    identity: bool,
+    mult: [f32; 4],
+    add: [f32; 4],
+    last: Option<(u32, u32)>,
+}
+
+impl ColorTransformer {
+    fn new(mult: [f32; 4], add: [f32; 4]) -> Self {
+        Self { identity: mult == [1.0; 4] && add == [0.0; 4], mult, add, last: None }
+    }
+
+    #[inline]
+    fn apply(&mut self, color: u32) -> u32 {
+        if let Some((from, to)) = self.last {
+            if from == color {
+                return to;
+            }
+        }
+        let [r, g, b, a] = color.to_le_bytes();
+        let channel =
+            |c: u8, i: usize| (f32::from(c) / 255.0 * self.mult[i] + self.add[i]).clamp(0.0, 1.0);
+        let (r, g, b, a) = (channel(r, 0), channel(g, 1), channel(b, 2), channel(a, 3));
+        let to_u8 = |v: f32| (v * 255.0 + 0.5) as u8;
+        let out = u32::from_le_bytes([to_u8(r * a), to_u8(g * a), to_u8(b * a), to_u8(a)]);
+        self.last = Some((color, out));
+        out
+    }
+}
+
+/// Solid-colour shapes collected in drawing order, already in stage pixels
+/// with their colour transforms applied, drawn with one call when anything
+/// else needs the GPU (`GlowRenderBackend::flush_batch`).
+struct ColorBatch {
+    vertices: Vec<Vertex>,
+    indices: Vec<u16>,
+    vao: glow::VertexArray,
+    vertex_buffer: glow::Buffer,
+    index_buffer: glow::Buffer,
+}
+
+impl ColorBatch {
+    fn new(gl: &glow::Context, program: &ShaderProgram) -> Result<Self, Error> {
+        unsafe {
+            let vao = gl.create_vertex_array().map_err(Error::GlCreate)?;
+            let vertex_buffer = gl.create_buffer().map_err(Error::GlCreate)?;
+            let index_buffer = gl.create_buffer().map_err(Error::GlCreate)?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertex_buffer));
+            program.bind_vertex_layout(gl);
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(index_buffer));
+            gl.bind_vertex_array(None);
+            Ok(Self {
+                vertices: Vec::with_capacity(8192),
+                indices: Vec::with_capacity(16384),
+                vao,
+                vertex_buffer,
+                index_buffer,
+            })
+        }
+    }
+
+    /// Adds the first `count` indices of `draw` (and all its vertices).
+    fn append(&mut self, draw: &CpuDraw, count: usize, matrix: &Matrix, color: &mut ColorTransformer) {
+        let base = self.vertices.len() as u16;
+        let (a, b, c, d) = (matrix.a, matrix.b, matrix.c, matrix.d);
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        let place = |p: &[f32; 2]| [a * p[0] + c * p[1] + tx, b * p[0] + d * p[1] + ty];
+        if color.identity {
+            self.vertices.extend(
+                draw.positions
+                    .iter()
+                    .zip(draw.premultiplied.iter())
+                    .map(|(p, &color)| Vertex { position: place(p), color }),
+            );
+        } else {
+            self.vertices.extend(
+                draw.positions
+                    .iter()
+                    .zip(draw.colors.iter())
+                    .map(|(p, &raw)| Vertex { position: place(p), color: color.apply(raw) }),
+            );
+        }
+        self.indices.extend(draw.indices[..count].iter().map(|&i| i + base));
+    }
+
+    /// Adds the unit square under `matrix` in one premultiplied colour.
+    fn append_rect(&mut self, matrix: &Matrix, color: u32) {
+        let base = self.vertices.len() as u16;
+        let (tx, ty) = (matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32);
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            self.vertices.push(Vertex {
+                position: [matrix.a * x + matrix.c * y + tx, matrix.b * x + matrix.d * y + ty],
+                color,
+            });
+        }
+        self.indices.extend([0, 1, 2, 0, 2, 3].map(|i| i + base));
+    }
+}
+
 #[derive(Debug)]
 enum DrawType {
     Color,
@@ -1901,6 +2815,8 @@ struct ShaderProgram {
     uniforms: [Option<glow::UniformLocation>; NUM_UNIFORMS],
     vertex_position_location: Option<u32>,
     vertex_color_location: Option<u32>,
+    vertex_uv_location: Option<u32>,
+    vertex_params_location: Option<u32>,
 }
 
 const NUM_UNIFORMS: usize = 10;
@@ -1955,6 +2871,8 @@ impl ShaderProgram {
                 uniforms,
                 vertex_position_location: gl.get_attrib_location(program, "position"),
                 vertex_color_location: gl.get_attrib_location(program, "color"),
+                vertex_uv_location: gl.get_attrib_location(program, "uv"),
+                vertex_params_location: gl.get_attrib_location(program, "params"),
             };
             // The sampler always reads unit 0; set it once instead of per draw.
             gl.use_program(Some(program));
@@ -1973,6 +2891,40 @@ impl ShaderProgram {
             }
             if let Some(loc) = self.vertex_color_location {
                 gl.vertex_attrib_pointer_f32(loc, 4, glow::UNSIGNED_BYTE, true, 12, 8);
+                gl.enable_vertex_attrib_array(loc);
+            }
+        }
+    }
+
+    /// Like `bind_vertex_layout`, for `UvVertex` (the bitmap batch).
+    fn bind_uv_layout(&self, gl: &glow::Context) {
+        unsafe {
+            if let Some(loc) = self.vertex_position_location {
+                gl.vertex_attrib_pointer_f32(loc, 2, glow::FLOAT, false, 16, 0);
+                gl.enable_vertex_attrib_array(loc);
+            }
+            if let Some(loc) = self.vertex_uv_location {
+                gl.vertex_attrib_pointer_f32(loc, 2, glow::FLOAT, false, 16, 8);
+                gl.enable_vertex_attrib_array(loc);
+            }
+        }
+    }
+
+    /// Like `bind_vertex_layout`, for `GradientVertex` (the gradient batch).
+    fn bind_gradient_layout(&self, gl: &glow::Context) {
+        unsafe {
+            for (loc, size, offset) in [
+                (self.vertex_position_location, 2, 0),
+                (self.vertex_uv_location, 2, 8),
+                (self.vertex_params_location, 4, 16),
+            ] {
+                if let Some(loc) = loc {
+                    gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, 36, offset);
+                    gl.enable_vertex_attrib_array(loc);
+                }
+            }
+            if let Some(loc) = self.vertex_color_location {
+                gl.vertex_attrib_pointer_f32(loc, 4, glow::UNSIGNED_BYTE, true, 36, 32);
                 gl.enable_vertex_attrib_array(loc);
             }
         }

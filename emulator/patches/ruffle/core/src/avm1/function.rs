@@ -80,6 +80,10 @@ pub struct Avm1Function<'gc> {
     /// The flags that define the preloaded registers of the function.
     #[collect(require_static)]
     flags: FunctionFlags,
+
+    /// RuffleVita: this function's id for `rv_prof` (0 when not profiling).
+    #[collect(require_static)]
+    prof_id: u16,
 }
 
 impl<'gc> Avm1Function<'gc> {
@@ -112,10 +116,18 @@ impl<'gc> Avm1Function<'gc> {
             })
             .collect();
 
+        let prof_id = crate::rv_prof::register_function(
+            (actions.movie.data().as_ptr() as usize, actions.start),
+            || match &name {
+                Some(name) => name.to_string(),
+                None => format!("anonymous @ {} +0x{:x}", actions.movie.url().rsplit('/').next().unwrap_or(""), actions.start),
+            },
+        );
         Avm1Function {
             swf_version,
             data: actions,
             name,
+            prof_id,
             register_count: swf_function.register_count,
             params,
             scope,
@@ -283,6 +295,8 @@ impl<'gc> Avm1Function<'gc> {
         reason: ExecutionReason,
         callee: Object<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
+        let _function = crate::rv_prof::enter_function(self.prof_id);
+        crate::rv_deep_zone!(Avm1CallSetup);
         let this_obj = match this {
             Value::Object(obj) => Some(obj),
             _ => None,
@@ -562,11 +576,13 @@ impl<'gc> FunctionObject<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         match self.function {
             Executable::Native(nf) => {
+                let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Avm1Native);
                 // TODO: Change NativeFunction to accept `this: Value`.
                 let this = this.coerce_to_object(activation);
                 nf(activation, this, args)
             }
             Executable::TableNative { native, index } => {
+                let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::Avm1Native);
                 // TODO: Change TableNativeFunction to accept `this: Value`.
                 let this = this.coerce_to_object(activation);
                 native(activation, this, args, index)

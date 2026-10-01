@@ -11,6 +11,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+rv_prof = { path = "../../../rv_prof" }
 linkme = { version = "0.3", optional = true }
 byteorder = { workspace = true }
 bitstream-io = { workspace = true }
@@ -93,6 +94,12 @@ egui = ["dep:egui", "dep:egui_extras", "png"]
 jpegxr = ["dep:jpegxr", "lzma"]
 default_font = []
 serde = ["serde/derive"]
+# RuffleVita: count executed AVM2 ops and op pairs (profiling builds only).
+rv_opstats = []
+# RuffleVita: keep AVM2 op handlers out of line so profilers can see them.
+rv_outline = []
+# RuffleVita: also profile AVM2 (zones, methods, ops) for rv_prof reports.
+rv_prof_ops = []
 
 [build-dependencies]
 build_playerglobal = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d" }

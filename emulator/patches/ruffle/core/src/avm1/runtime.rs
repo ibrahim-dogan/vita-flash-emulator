@@ -9,10 +9,14 @@ use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer};
 use crate::frame_lifecycle::FramePhase;
 use crate::string::{AvmString, StringContext};
-use crate::tag_utils::SwfSlice;
+use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::{avm1, avm_debug};
 use gc_arena::{Collect, Gc, Mutation};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
 use swf::avm1::read::Reader;
+use swf::avm1::types::Action;
 use tracing::instrument;
 
 /// The global environment.
@@ -58,6 +62,13 @@ pub struct Avm1<'gc> {
     /// The constant pool to use for new activations from code sources that
     /// don't close over the constant pool they were defined with.
     constant_pool: Gc<'gc, Vec<Value<'gc>>>,
+
+    /// RuffleVita: constant pools already decoded, by where their bytes are.
+    constant_pool_cache: ConstantPoolCache<'gc>,
+
+    /// RuffleVita: action lists already decoded (see `ActionCache`).
+    #[collect(require_static)]
+    action_cache: ActionCache,
 
     /// The global environment, dependent on the ambient SWF version.
     env_case_sensitive: GlobalEnv<'gc>,
@@ -116,6 +127,8 @@ impl<'gc> Avm1<'gc> {
         Self {
             player_version,
             constant_pool: Gc::new(gc_context, vec![]),
+            constant_pool_cache: ConstantPoolCache::default(),
+            action_cache: ActionCache::default(),
             env_case_insensitive: GlobalEnv::create(context),
             env_case_sensitive: GlobalEnv::create(context),
             display_properties: stage_object::DisplayPropertyMap::new(context),
@@ -145,6 +158,7 @@ impl<'gc> Avm1<'gc> {
             // We've been told to ignore all future execution.
             return;
         }
+        crate::rv_deep_zone!(Avm1ScriptSetup);
 
         let mut parent_activation = Activation::from_nothing(
             context,
@@ -397,6 +411,18 @@ impl<'gc> Avm1<'gc> {
         self.constant_pool
     }
 
+    pub fn action_cache_mut(&mut self) -> &mut ActionCache {
+        &mut self.action_cache
+    }
+
+    pub fn constant_pool_cache(&self) -> &ConstantPoolCache<'gc> {
+        &self.constant_pool_cache
+    }
+
+    pub fn constant_pool_cache_mut(&mut self) -> &mut ConstantPoolCache<'gc> {
+        &mut self.constant_pool_cache
+    }
+
     /// Sets the constant pool to use for new activations from code sources that
     /// don't close over the constant pool they were defined with.
     pub fn set_constant_pool(&mut self, constant_pool: Gc<'gc, Vec<Value<'gc>>>) {
@@ -631,4 +657,162 @@ pub fn root_error_handler<'gc>(activation: &mut Activation<'_, 'gc>, error: Erro
         }
     }
     activation.context.avm1.halt();
+}
+
+/// RuffleVita: `ActionConstantPool` runs every time a frame script or
+/// function starts, and decoding and interning its strings again each time
+/// is a good part of what AS1/2 games spend in the interpreter. Pools are
+/// cached by the address, length and encoding of their bytes, and the bytes
+/// are compared before a cached pool is used, so a reused address can't
+/// return the wrong strings: the same bytes always decode the same way.
+#[derive(Default)]
+pub struct ConstantPoolCache<'gc> {
+    map: std::collections::HashMap<(usize, usize, usize), (Box<[u8]>, Gc<'gc, Vec<Value<'gc>>>)>,
+}
+
+/// Pools kept at most; the cache starts over when it's full.
+const CONSTANT_POOL_CACHE_SIZE: usize = 4096;
+
+unsafe impl<'gc> Collect<'gc> for ConstantPoolCache<'gc> {
+    fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
+        for (_, pool) in self.map.values() {
+            cc.trace(pool);
+        }
+    }
+}
+
+impl<'gc> ConstantPoolCache<'gc> {
+    /// The bytes the pool was read from: its strings and their terminators,
+    /// which lie next to each other in the action.
+    fn key<'a>(
+        strings: &[&'a swf::SwfStr],
+        encoding: &'static swf::Encoding,
+    ) -> Option<((usize, usize, usize), &'a [u8])> {
+        let first = strings.first()?.as_bytes();
+        let last = strings.last()?.as_bytes();
+        let start = first.as_ptr();
+        let end = last.as_ptr().wrapping_add(last.len());
+        let len = (end as usize).checked_sub(start as usize)?;
+        // SAFETY: every string borrows the same action data, in order, so
+        // `start..end` lies within that one slice.
+        let bytes = unsafe { std::slice::from_raw_parts(start, len) };
+        Some(((start as usize, len, encoding as *const _ as usize), bytes))
+    }
+
+    pub fn get(
+        &self,
+        strings: &[&swf::SwfStr],
+        encoding: &'static swf::Encoding,
+    ) -> Option<Gc<'gc, Vec<Value<'gc>>>> {
+        let (key, bytes) = Self::key(strings, encoding)?;
+        let (cached_bytes, pool) = self.map.get(&key)?;
+        (**cached_bytes == *bytes && pool.len() == strings.len()).then_some(*pool)
+    }
+
+    pub fn insert(
+        &mut self,
+        strings: &[&swf::SwfStr],
+        encoding: &'static swf::Encoding,
+        pool: Gc<'gc, Vec<Value<'gc>>>,
+    ) {
+        let Some((key, bytes)) = Self::key(strings, encoding) else { return };
+        if self.map.len() >= CONSTANT_POOL_CACHE_SIZE {
+            self.map.clear();
+        }
+        self.map.insert(key, (bytes.into(), pool));
+    }
+}
+
+/// RuffleVita: AVM1 normally decodes every action from the SWF bytes each
+/// time it runs, including every iteration of every loop and every call of
+/// every function. On the Vita that was 14% of a typical AS2 game's frame.
+/// Each piece of code (frame script, event handler, function body) is
+/// decoded once instead, into a list of actions with their byte positions,
+/// and run from that list (`Activation::run_cached_actions`).
+///
+/// Decoded actions borrow the SWF bytes; each entry holds the movie, so the
+/// bytes stay alive (and in place) for as long as the entry exists.
+#[derive(Default)]
+pub struct ActionCache {
+    entries: HashMap<(usize, usize, usize, u8), Rc<DecodedActions>>,
+    /// Actions held by all entries, to keep memory in check.
+    total: usize,
+}
+
+/// Decoded actions kept at most; the cache starts over when it's full.
+const ACTION_CACHE_LIMIT: usize = 400_000;
+
+pub struct DecodedActions {
+    _movie: Arc<SwfMovie>,
+    pub actions: Vec<DecodedAction>,
+    /// Where decoding stopped early (a malformed action), relative to the
+    /// code start; execution continues there with the byte reader, which
+    /// reports the error exactly as before.
+    pub stopped_at: Option<usize>,
+}
+
+pub struct DecodedAction {
+    /// Byte offset of the action, relative to the code start.
+    pub pos: u32,
+    /// Byte offset just past it (where jump offsets count from).
+    pub end: u32,
+    /// The action code, for `rv_prof`.
+    pub code: u8,
+    pub action: Action<'static>,
+}
+
+impl DecodedActions {
+    /// The index of the action at `pos` (relative to the code start), if an
+    /// action starts exactly there.
+    pub fn index_of(&self, pos: isize) -> Option<usize> {
+        let pos = u32::try_from(pos).ok()?;
+        self.actions.binary_search_by_key(&pos, |a| a.pos).ok()
+    }
+}
+
+impl ActionCache {
+    pub fn get(&mut self, code: &SwfSlice, swf_version: u8) -> Rc<DecodedActions> {
+        let key = (code.movie.data().as_ptr() as usize, code.start, code.end, swf_version);
+        if let Some(entry) = self.entries.get(&key) {
+            return entry.clone();
+        }
+        let decoded = Rc::new(decode_actions(code, swf_version));
+        self.total += decoded.actions.len();
+        if self.total > ACTION_CACHE_LIMIT {
+            self.entries.clear();
+            self.total = decoded.actions.len();
+        }
+        self.entries.insert(key, decoded.clone());
+        decoded
+    }
+}
+
+fn decode_actions(code: &SwfSlice, swf_version: u8) -> DecodedActions {
+    let data = &code.movie.data()[code.start..];
+    let len = code.end.saturating_sub(code.start);
+    let mut reader = Reader::new(data, swf_version);
+    let mut actions = Vec::new();
+    let mut stopped_at = None;
+    loop {
+        let pos = data.len() - reader.get_ref().len();
+        if pos >= len {
+            break;
+        }
+        let action_code = reader.get_ref().first().copied().unwrap_or(0);
+        match reader.read_action() {
+            Ok(action) => {
+                let end = data.len() - reader.get_ref().len();
+                // SAFETY: the action borrows `code.movie`'s bytes, which the
+                // entry keeps alive (`_movie`) and which never move.
+                let action = unsafe { std::mem::transmute::<Action<'_>, Action<'static>>(action) };
+                actions.push(DecodedAction { pos: pos as u32, end: end as u32, code: action_code, action });
+            }
+            Err(_) => {
+                stopped_at = Some(pos);
+                break;
+            }
+        }
+    }
+    actions.shrink_to_fit();
+    DecodedActions { _movie: code.movie.clone(), actions, stopped_at }
 }

@@ -159,6 +159,16 @@ impl PartialEq for Value<'_> {
     }
 }
 
+/// The numeric case of the abstract relational comparison: `None` for NaN.
+#[inline(always)]
+fn number_lt(a: f64, b: f64) -> Option<bool> {
+    if a.is_nan() || b.is_nan() {
+        None
+    } else {
+        Some(a < b)
+    }
+}
+
 fn fits_in_value_integer_i32(value: i32) -> bool {
     value < (1 << 28) && value >= -(1 << 28)
 }
@@ -739,7 +749,21 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToNumber algorithm which appears to match AVM2.
+    #[inline(always)]
     pub fn coerce_to_number(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<f64, Error<'gc>> {
+        // RuffleVita: keep the numeric cases inline at every call site.
+        match self {
+            Value::Number(n) => Ok(*n),
+            Value::Integer(i) => Ok(*i as f64),
+            _ => self.coerce_to_number_slow(activation),
+        }
+    }
+
+    #[inline(never)]
+    fn coerce_to_number_slow(
         &self,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<f64, Error<'gc>> {
@@ -767,6 +791,7 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToUint32 algorithm which appears to match AVM2.
+    #[inline(always)]
     pub fn coerce_to_u32(&self, activation: &mut Activation<'_, 'gc>) -> Result<u32, Error<'gc>> {
         Ok(match self {
             Value::Integer(i) => *i as u32,
@@ -774,7 +799,7 @@ impl<'gc> Value<'gc> {
             Value::Bool(b) => *b as u32,
             Value::Undefined | Value::Null => 0,
             Value::String(_) | Value::Object(_) => {
-                f64_to_wrapping_u32(self.coerce_to_number(activation)?)
+                f64_to_wrapping_u32(self.coerce_to_number_slow(activation)?)
             }
         })
     }
@@ -786,6 +811,7 @@ impl<'gc> Value<'gc> {
     ///
     /// Numerical conversions occur according to ECMA-262 3rd Edition's
     /// ToInt32 algorithm which appears to match AVM2.
+    #[inline(always)]
     pub fn coerce_to_i32(&self, activation: &mut Activation<'_, 'gc>) -> Result<i32, Error<'gc>> {
         Ok(match self {
             Value::Integer(i) => *i,
@@ -793,7 +819,7 @@ impl<'gc> Value<'gc> {
             Value::Bool(b) => *b as i32,
             Value::Undefined | Value::Null => 0,
             Value::String(_) | Value::Object(_) => {
-                f64_to_wrapping_i32(self.coerce_to_number(activation)?)
+                f64_to_wrapping_i32(self.coerce_to_number_slow(activation)?)
             }
         })
     }
@@ -1460,7 +1486,24 @@ impl<'gc> Value<'gc> {
     /// type, then this function will coerce the given value to that type.
     ///
     /// If the type is not coercible to the given type, an error is thrown.
+    #[inline(always)]
     pub fn coerce_to_type(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        class: Class<'gc>,
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        // RuffleVita: a Number stays a Number, an int stays an int, and an
+        // object of exactly the class stays as it is.
+        match self {
+            Value::Number(_) if class.is_builtin_number() => Ok(*self),
+            Value::Integer(_) if class.is_builtin_int() => Ok(*self),
+            Value::Object(o) if o.instance_class() == class => Ok(*self),
+            _ => self.coerce_to_type_slow(activation, class),
+        }
+    }
+
+    #[inline(never)]
+    fn coerce_to_type_slow(
         &self,
         activation: &mut Activation<'_, 'gc>,
         class: Class<'gc>,
@@ -1812,6 +1855,10 @@ impl<'gc> Value<'gc> {
     ) -> Result<Option<bool>, Error<'gc>> {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => Ok(Some(a < b)),
+            // RuffleVita: numbers need neither ToPrimitive nor ToNumber.
+            (Value::Number(a), Value::Number(b)) => Ok(number_lt(*a, *b)),
+            (Value::Integer(a), Value::Number(b)) => Ok(number_lt(*a as f64, *b)),
+            (Value::Number(a), Value::Integer(b)) => Ok(number_lt(*a, *b as f64)),
             _ => {
                 let prim_self = self.coerce_to_primitive(Some(Hint::Number), activation)?;
                 let prim_other = other.coerce_to_primitive(Some(Hint::Number), activation)?;

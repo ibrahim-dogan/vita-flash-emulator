@@ -1,4 +1,5 @@
 use crate::avm2::op::Op;
+use crate::avm2::verify::Exception;
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -222,4 +223,73 @@ fn simple_scope_structure(
     }
 
     Some((getlocal0_pos, pushscope_pos))
+}
+
+/// RuffleVita: replaces the most common op pairs with one superinstruction
+/// (see the RuffleVita section of `Op`). Runs after every other pass, right
+/// before Nops are removed, so no other pass has to know about them.
+///
+/// A pair is fused only when nothing can jump between its two ops (no jump or
+/// exception target on the second op or on a Nop between them). When the first
+/// op can throw, a try block must also not start or end between them, since
+/// the fused op takes the second op's place.
+pub fn fuse_superinstructions(
+    ops: &[Cell<Op<'_>>],
+    jump_targets: &HashSet<usize>,
+    exceptions: &[Exception<'_>],
+) {
+    let try_boundary =
+        |i: usize| exceptions.iter().any(|e| e.from_offset == i || e.to_offset == i);
+
+    // `local.slot` first, so `GetLocal a; GetLocal b; GetSlot` becomes
+    // `GetLocal a; GetLocalSlot b` rather than `GetLocal2; GetSlot`.
+    for pass in 0..3 {
+        let mut prev: Option<usize> = None;
+        for (i, cell) in ops.iter().enumerate() {
+            if jump_targets.contains(&i) {
+                prev = None;
+            }
+            let op = cell.get();
+            if op.is_nop() {
+                continue;
+            }
+            if let Some(p) = prev {
+                let fused = match (pass, ops[p].get(), op) {
+                    (0, Op::GetLocal { index }, Op::GetSlot { index: slot }) => {
+                        Some(Op::GetLocalSlot { index, slot })
+                    }
+                    (1, Op::GetLocal { index: first }, Op::GetLocal { index: second }) => {
+                        Some(Op::GetLocal2 { first, second })
+                    }
+                    (1, Op::SetLocal { index: set }, Op::GetLocal { index: get }) if set != get => {
+                        Some(Op::SetLocalGetLocal { set, get })
+                    }
+                    (2, compare, Op::IfTrue { offset }) if !try_boundary(i) => match compare {
+                        Op::LessThan => Some(Op::IfLt { offset }),
+                        Op::LessEquals => Some(Op::IfLe { offset }),
+                        Op::GreaterThan => Some(Op::IfGt { offset }),
+                        Op::GreaterEquals => Some(Op::IfGe { offset }),
+                        Op::Equals => Some(Op::IfEq { offset }),
+                        Op::StrictEquals => Some(Op::IfStrictEq { offset }),
+                        _ => None,
+                    },
+                    (2, compare, Op::IfFalse { offset }) if !try_boundary(i) => match compare {
+                        Op::LessThan => Some(Op::IfNotLt { offset }),
+                        Op::LessEquals => Some(Op::IfNotLe { offset }),
+                        Op::GreaterThan => Some(Op::IfNotGt { offset }),
+                        Op::GreaterEquals => Some(Op::IfNotGe { offset }),
+                        Op::Equals => Some(Op::IfNotEq { offset }),
+                        Op::StrictEquals => Some(Op::IfNotStrictEq { offset }),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(fused) = fused {
+                    ops[p].set(Op::Nop);
+                    cell.set(fused);
+                }
+            }
+            prev = Some(i);
+        }
+    }
 }
