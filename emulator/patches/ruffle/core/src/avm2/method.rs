@@ -145,6 +145,11 @@ struct MethodData<'gc> {
     /// 0 = not looked up yet, 1 = none, n = `aot::generated::TABLE[n - 2]`.
     #[collect(require_static)]
     aot_slot: std::cell::Cell<u16>,
+
+    /// RuffleVita: whether this is `b2World.Step` (for the optional physics
+    /// iteration cap): 0 = unknown, 1 = no, 2 = yes.
+    #[collect(require_static)]
+    box2d_step: std::cell::Cell<u8>,
 }
 
 impl PartialEq for Method<'_> {
@@ -235,6 +240,7 @@ impl<'gc> Method<'gc> {
                 is_unchecked: is_function && all_params_unchecked,
                 prof_id: std::cell::Cell::new(0),
                 aot_slot: std::cell::Cell::new(0),
+                box2d_step: std::cell::Cell::new(0),
             },
         )))
     }
@@ -247,6 +253,24 @@ impl<'gc> Method<'gc> {
 
     pub fn set_aot_slot(self, slot: u16) {
         self.0.aot_slot.set(slot);
+    }
+
+    /// RuffleVita: whether this method is Box2D's `b2World.Step`, decided once
+    /// from its name and remembered. Used by the optional physics iteration
+    /// cap (see `function::phys_iter_cap`).
+    pub fn is_box2d_step(self) -> bool {
+        match self.0.box2d_step.get() {
+            1 => false,
+            2 => true,
+            _ => {
+                let mut name = crate::string::WString::new();
+                crate::avm2::function::display_function(&mut name, self);
+                let name = name.to_utf8_lossy();
+                let yes = name.contains("b2World") && name.ends_with("Step()");
+                self.0.box2d_step.set(if yes { 2 } else { 1 });
+                yes
+            }
+        }
     }
 
     /// RuffleVita: an id for `rv_prof` (0 when not profiling).

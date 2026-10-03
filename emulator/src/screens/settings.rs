@@ -1,7 +1,7 @@
 //! Per-game settings: button bindings, sticks and display options. Used from
 //! both the library and the in-game pause menu (where changes apply live).
 
-use crate::config::{Profile, Quality, ScaleMode, StickMode};
+use crate::config::{PhysicsMode, Profile, Quality, ScaleMode, StickMode};
 use crate::input::{Btn, InputEvent, Panel, TouchPhase};
 use crate::platform::{SCREEN_H, SCREEN_W};
 use crate::screens::keypicker::{KeyPicker, PickResult};
@@ -29,6 +29,7 @@ enum Row {
     ResetControls,
     Scale,
     Quality,
+    Physics,
     ShowFps,
     CursorSpeed,
     RearTouch,
@@ -80,6 +81,7 @@ impl SettingsScreen {
             Tab::Display => vec![
                 Row::Scale,
                 Row::Quality,
+                Row::Physics,
                 Row::ShowFps,
                 Row::CursorSpeed,
                 Row::RearTouch,
@@ -107,6 +109,7 @@ impl SettingsScreen {
             Row::RightStick => p.right_stick = step(&StickMode::ALL, p.right_stick, dir),
             Row::Scale => p.scale = step(&ScaleMode::ALL, p.scale, dir),
             Row::Quality => p.quality = step(&Quality::ALL, p.quality, dir),
+            Row::Physics => p.physics = step(&PhysicsMode::ALL, p.physics, dir),
             Row::ShowFps => p.show_fps = !p.show_fps,
             Row::RearTouch => p.rear_touch = !p.rear_touch,
             Row::VSync => self.vsync = !self.vsync,
@@ -254,6 +257,7 @@ impl SettingsScreen {
             Row::RightStick => (p.right_stick.label().into(), true),
             Row::Scale => (p.scale.label().into(), true),
             Row::Quality => (p.quality.label().into(), true),
+            Row::Physics => (p.physics.label().into(), true),
             Row::ShowFps => (on_off(p.show_fps), true),
             Row::RearTouch => (on_off(p.rear_touch), true),
             Row::VSync => (on_off(self.vsync), true),
@@ -270,6 +274,7 @@ impl SettingsScreen {
             Row::ResetControls => ("Reset controls to defaults", None),
             Row::Scale => ("Screen fit", Some("How the game fills the 960\u{00d7}544 screen")),
             Row::Quality => ("Render quality", Some("Low turns off bitmap smoothing")),
+            Row::Physics => ("Physics speed", Some("Fast speeds up physics-heavy games; a little looser")),
             Row::ShowFps => ("Show FPS counter", None),
             Row::CursorSpeed => ("Stick cursor speed", None),
             Row::RearTouch => ("Rear touchpad as trackpad", Some("Drag to move the cursor, tap to click")),

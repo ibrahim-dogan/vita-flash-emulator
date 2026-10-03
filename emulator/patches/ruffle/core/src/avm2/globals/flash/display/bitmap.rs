@@ -53,7 +53,7 @@ pub fn bitmap_allocator<'gc>(
                 .library_for_movie_mut(movie)
                 .character_by_id(symbol)
             {
-                let new_bitmap_data = fill_bitmap_data_from_symbol(activation, bitmap.compressed());
+                let new_bitmap_data = fill_bitmap_data_from_symbol(activation, &bitmap);
                 let bitmap_data_obj =
                     BitmapDataObject::from_bitmap_data(activation.context, new_bitmap_data);
                 new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);

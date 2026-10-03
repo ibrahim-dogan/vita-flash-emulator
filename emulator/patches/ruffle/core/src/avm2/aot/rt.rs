@@ -192,7 +192,7 @@ fn call_leaf<'gc>(
     args: &[Value<'gc>],
 ) -> Option<Result<Value<'gc>, Error<'gc>>> {
     const MAX_ARGS: usize = 7;
-    if args.len() > MAX_ARGS || object.get_bound_method(index).is_some() {
+    if args.len() > MAX_ARGS || crate::rv_stack::exhausted() || object.get_bound_method(index).is_some() {
         return None;
     }
     let full_method = object.vtable().get_full_method(index)?;
@@ -255,9 +255,19 @@ pub fn get_property_fast<'gc>(
     object: Value<'gc>,
     name: Value<'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
+    use crate::avm2::object::TObject;
+    use crate::avm2::Object;
     if let (Value::Object(o), Value::Integer(_) | Value::Number(_)) = (object, name) {
-        if let Some(value) = name.try_as_index().and_then(|index| o.get_index_property(index)) {
-            return Ok(value);
+        if let Some(index) = name.try_as_index() {
+            // The common types call their own method: no dispatch on `Object`.
+            let found = match o {
+                Object::ArrayObject(a) => a.get_index_property(index),
+                Object::VectorObject(v) => v.get_index_property(index),
+                o => o.get_index_property(index),
+            };
+            if let Some(value) = found {
+                return Ok(value);
+            }
         }
     }
     delegate(act, op, &[object, name], true)
@@ -286,6 +296,10 @@ pub fn set_property_fast<'gc>(
 
 #[inline(always)]
 pub fn get_slot<'gc>(act: &mut Activation<'_, 'gc>, object: Value<'gc>, slot: u32) -> Result<Value<'gc>, Error<'gc>> {
+    // Plain class instances: straight to the slots, no dispatch on `Object`.
+    if let Value::Object(crate::avm2::Object::ScriptObject(so)) = object {
+        return Ok(crate::avm2::object::ScriptObjectWrapper(so.0).get_slot(slot));
+    }
     let object = object
         .null_check(act, None)?
         .as_object()
@@ -304,6 +318,10 @@ pub fn set_slot<'gc>(act: &mut Activation<'_, 'gc>, object: Value<'gc>, value: V
 
 #[inline(always)]
 pub fn set_slot_no_coerce<'gc>(act: &mut Activation<'_, 'gc>, object: Value<'gc>, value: Value<'gc>, slot: u32) -> Result<(), Error<'gc>> {
+    if let Value::Object(crate::avm2::Object::ScriptObject(so)) = object {
+        crate::avm2::object::ScriptObjectWrapper(so.0).set_slot(slot, value, act.gc());
+        return Ok(());
+    }
     let object = object
         .null_check(act, None)?
         .as_object()

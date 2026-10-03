@@ -12,6 +12,9 @@ pub fn get_current_date_time() -> DateTime<Utc> {
             .single()
             .expect("Unambiguous mock time")
             .into()
+    } else if let Some(ms) = crate::rv_clock::now_ms() {
+        // RuffleVita: timedemos run on a virtual clock (see rv_clock).
+        Utc.timestamp_millis_opt(1_000_000_000_000 + i64::from(ms)).single().expect("valid timestamp")
     } else {
         Utc::now()
     }

@@ -120,6 +120,64 @@ static DEDICATED_FRAMEBUFFERS: AtomicU32 = AtomicU32::new(0);
 /// Describes free memory for the log; set by the app (vitaGL pools on Vita).
 pub static MEMORY_PROBE: std::sync::OnceLock<fn() -> Option<String>> = std::sync::OnceLock::new();
 
+/// Free GPU memory in bytes; set by the app (vitaGL's pools on Vita).
+pub static GPU_FREE: std::sync::OnceLock<fn() -> usize> = std::sync::OnceLock::new();
+
+/// RuffleVita: refuses a large texture that would use up the GPU memory.
+/// vitaGL crashes when it runs out; a refused texture is an error Ruffle
+/// handles (a bitmap cache is skipped, a BitmapData ends just that game).
+/// RuffleVita: memory to keep free after a texture, so the many small bitmaps
+/// a game registers afterwards still fit.
+const KEEP_FREE: usize = 12 << 20;
+
+fn check_gpu_room(width: u32, height: u32) -> Result<(), BitmapError> {
+    const LARGE: usize = 1 << 20;
+    let bytes = width as usize * height as usize * 4;
+    match GPU_FREE.get() {
+        Some(free) if bytes >= LARGE && free() < bytes + KEEP_FREE => {
+            let memory = MEMORY_PROBE.get().and_then(|probe| probe()).unwrap_or_default();
+            log::warn!(target: "rufflevita", "Not enough GPU memory for a {width}x{height} texture \u{b7} {memory}");
+            Err(BitmapError::Unimplemented("not enough GPU memory".into()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// RuffleVita: the largest width/height for a bitmap that fits in the GPU
+/// memory free right now (leaving `KEEP_FREE` for later bitmaps), or `None`
+/// when there is no GPU probe (desktop) or it already fits. Keeps the aspect
+/// ratio; never goes below 64 px on a side so something always uploads.
+fn memory_limited_size(width: u32, height: u32) -> Option<(u32, u32)> {
+    let free = (GPU_FREE.get()?)();
+    let bytes = width as usize * height as usize * 4;
+    let budget = free.saturating_sub(KEEP_FREE);
+    if bytes <= budget {
+        return None;
+    }
+    let scale = (budget as f64 / bytes as f64).sqrt();
+    let w = ((width as f64 * scale) as u32).clamp(64, width.max(64));
+    let h = ((height as f64 * scale) as u32).clamp(64, height.max(64));
+    Some((w, h))
+}
+
+/// RuffleVita: resizes a bitmap's pixels to `width`x`height` in place.
+fn resize_bitmap(bitmap: &mut Bitmap, width: u32, height: u32, format: u32) {
+    let filter = image::imageops::FilterType::Triangle;
+    if format == glow::RGBA {
+        let image =
+            image::RgbaImage::from_raw(bitmap.width(), bitmap.height(), bitmap.data().to_vec())
+                .expect("Width and height of bitmap must match bitmap data");
+        let resized = image::imageops::resize(&image, width, height, filter);
+        *bitmap = Bitmap::new(width, height, BitmapFormat::Rgba, resized.into_raw());
+    } else {
+        let image =
+            image::RgbImage::from_raw(bitmap.width(), bitmap.height(), bitmap.data().to_vec())
+                .expect("Width and height of bitmap must match bitmap data");
+        let resized = image::imageops::resize(&image, width, height, filter);
+        *bitmap = Bitmap::new(width, height, BitmapFormat::Rgb, resized.into_raw());
+    }
+}
+
 /// Logs work on large textures together with free memory, so that running
 /// out of memory while a game builds huge bitmaps leaves a trail in the log.
 fn log_large_texture(what: &str, width: u32, height: u32) {
@@ -877,21 +935,27 @@ impl GlowRenderBackend {
             height = max_size;
             width = (max_size as f32 * ratio) as u32;
         }
-        let filter = image::imageops::FilterType::Triangle;
-        if format == glow::RGBA {
-            let image =
-                image::RgbaImage::from_raw(bitmap.width(), bitmap.height(), bitmap.data().to_vec())
-                    .expect("Width and height of bitmap must match bitmap data");
-            let resized = image::imageops::resize(&image, width, height, filter);
-            *bitmap = Bitmap::new(width, height, BitmapFormat::Rgba, resized.into_raw());
-        } else {
-            let image =
-                image::RgbImage::from_raw(bitmap.width(), bitmap.height(), bitmap.data().to_vec())
-                    .expect("Width and height of bitmap must match bitmap data");
-            let resized = image::imageops::resize(&image, width, height, filter);
-            *bitmap = Bitmap::new(width, height, BitmapFormat::Rgb, resized.into_raw());
-        }
+        resize_bitmap(bitmap, width, height, format);
         true
+    }
+
+    /// RuffleVita: downscales a bitmap that would not fit in the GPU memory
+    /// free right now, so a game whose level art is a handful of huge bitmaps
+    /// loads (a little softer) instead of running vitaGL out of memory and
+    /// crashing. No-op on desktop (no GPU probe).
+    fn clamp_bitmap_memory(&self, bitmap: &mut Bitmap, format: u32) -> bool {
+        match memory_limited_size(bitmap.width(), bitmap.height()) {
+            Some((width, height)) => {
+                log::warn!(
+                    target: "rufflevita",
+                    "Downscaling a {}x{} bitmap to {width}x{height} to fit GPU memory",
+                    bitmap.width(), bitmap.height(),
+                );
+                resize_bitmap(bitmap, width, height, format);
+                true
+            }
+            None => false,
+        }
     }
 
     fn set_stencil_state(&mut self) {
@@ -1640,6 +1704,9 @@ impl RenderBackend for GlowRenderBackend {
             bitmap.to_rgba()
         };
         self.clamp_bitmap(&mut bitmap, format);
+        // RuffleVita: rather than refuse a bitmap that won't fit (which panics
+        // in Ruffle), shrink it to fit the GPU memory. Keeps the game alive.
+        self.clamp_bitmap_memory(&mut bitmap, format);
         log_large_texture("Uploading", bitmap.width(), bitmap.height());
         unsafe {
             let texture = self
@@ -1837,6 +1904,7 @@ impl RenderBackend for GlowRenderBackend {
         width: u32,
         height: u32,
     ) -> Result<BitmapHandle, BitmapError> {
+        check_gpu_room(width, height)?;
         unsafe {
             let texture = self
                 .gl

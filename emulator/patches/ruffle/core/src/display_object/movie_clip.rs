@@ -3377,9 +3377,18 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
         version: u8,
     ) -> Result<(), Error> {
-        let swf_shape = reader.read_define_shape(version)?;
-        let id = swf_shape.id;
-        let graphic = Graphic::from_swf_tag(context, swf_shape, self.movie());
+        // RuffleVita: read just the id and bounds now; the rest of the tag is
+        // parsed when the shape is first used (see `Graphic::from_swf_tag_lazy`).
+        let data = reader.get_ref();
+        let source = SwfSlice::from(self.movie()).to_subslice(data);
+        let (id, graphic) = if !data.is_empty() && source.len() == data.len() {
+            let id = reader.read_u16()?;
+            let bounds = reader.read_rectangle()?;
+            (id, Graphic::from_swf_tag_lazy(context, id, bounds, source, version, self.movie()))
+        } else {
+            let swf_shape = reader.read_define_shape(version)?;
+            (swf_shape.id, Graphic::from_swf_tag(context, swf_shape, self.movie()))
+        };
         self.library_mut(context)
             .register_character(id, Character::Graphic(graphic));
         Ok(())

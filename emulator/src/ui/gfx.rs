@@ -41,6 +41,63 @@ impl Color {
         let q = |c: f32| ((c.clamp(0.0, 1.0) * a) * 255.0 + 0.5) as u8;
         [q(self.r), q(self.g), q(self.b), (a * 255.0 + 0.5) as u8]
     }
+
+    /// The RGB as a 0xRRGGBB key, for the dark-mode remaps (alpha ignored).
+    fn rgb_key(self) -> u32 {
+        let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        (q(self.r) << 16) | (q(self.g) << 8) | q(self.b)
+    }
+
+    /// Replace this color's RGB with `rgb`, keeping its alpha.
+    fn with_rgb(self, rgb: u32) -> Color {
+        Color { a: self.a, ..Color::hex(rgb) }
+    }
+}
+
+/// RuffleVita: dark theme. The UI palette is a light theme (light panels, dark
+/// ink); rather than thread a theme through every widget, dark mode remaps
+/// colours at the two points where their role is known: surface fills
+/// (`rect`/`corners`/`pattern`/`clear`) darken, and text/icon colours lighten.
+/// The same value (e.g. the cream `PAPER`) is a dark panel when it fills a
+/// shape and stays light when it is text on the background. Accent colours
+/// (the yellow selection, red, green, face buttons) and cover art pass through.
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_dark(on: bool) {
+    DARK.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A fill/surface colour in dark mode: the light surfaces become dark.
+fn surface_remap(c: Color) -> Color {
+    if !dark() {
+        return c;
+    }
+    match c.rgb_key() {
+        0x2340C8 => c.with_rgb(0x171A24), // BLUE: screen background
+        0xFFF8E7 => c.with_rgb(0x2B303E), // PAPER: panel fill
+        0xF1E5C9 => c.with_rgb(0x232734), // PAPER_DIM
+        0x0F1226 => c.with_rgb(0x08090F), // INK: outlines, shadows, footer band
+        _ => c,                           // accents, covers, face buttons: unchanged
+    }
+}
+
+/// A text/icon colour in dark mode: dark ink becomes light. Accent text (red,
+/// green, the yellow logo) and text already light on the background pass
+/// through. `ON_ACCENT` is kept dark on purpose (text on the yellow selection).
+fn fg_remap(c: Color) -> Color {
+    if !dark() {
+        return c;
+    }
+    match c.rgb_key() {
+        0x0F1226 => c.with_rgb(0xE9E6DC), // INK as text on a panel
+        0x6B6456 => c.with_rgb(0xA39DAE), // MUTED
+        0xA0957F => c.with_rgb(0x7E7988), // FAINT
+        _ => c,                           // PAPER/ON_BLUE_DIM (light on bg), accents, ON_ACCENT
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -478,6 +535,7 @@ impl Gfx {
     // ---------------------------------------------------------------- frame
 
     pub fn clear(&self, color: Color) {
+        let color = surface_remap(color);
         unsafe {
             self.gl.clear_color(color.r, color.g, color.b, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
@@ -608,6 +666,7 @@ impl Gfx {
         if r.w <= 0.0 || r.h <= 0.0 || color.a <= 0.0 {
             return;
         }
+        let color = surface_remap(color);
         let uv = self.white;
         self.quad_uv(r, uv, color);
     }
@@ -623,6 +682,7 @@ impl Gfx {
     /// Draws the four corners of `r` using quadrants of the given disc
     /// texture, returning the radius actually used.
     fn corners(&mut self, r: Rect, radius: f32, inverse: bool, color: Color) -> f32 {
+        let color = surface_remap(color);
         let list = if inverse { &self.inv_corners } else { &self.corners };
         let (rad, uv) = *Self::pick(list, radius.min(r.w * 0.5).min(r.h * 0.5));
         let rf = rad as f32;
@@ -670,6 +730,7 @@ impl Gfx {
         if r.w <= 0.0 || r.h <= 0.0 || color.a <= 0.0 {
             return;
         }
+        let color = surface_remap(color);
         let t = PATTERN_TILE as f32;
         let uv = UvRect { u0: r.x / t, v0: r.y / t, u1: r.right() / t, v1: r.bottom() / t };
         let p = [[r.x, r.y], [r.right(), r.y], [r.right(), r.bottom()], [r.x, r.bottom()]];
@@ -685,6 +746,7 @@ impl Gfx {
     // ---------------------------------------------------------------- icons
 
     pub fn icon(&mut self, icon: Icon, x: f32, y: f32, size: f32, color: Color) {
+        let color = fg_remap(color);
         let px = size.round().max(4.0) as u16;
         let uv = match self.icons.get(&(icon, px)) {
             Some(uv) => *uv,
@@ -704,6 +766,7 @@ impl Gfx {
 
     /// Draws an icon centred on (`cx`, `cy`) rotated by `angle` radians.
     pub fn icon_rotated(&mut self, icon: Icon, cx: f32, cy: f32, size: f32, angle: f32, color: Color) {
+        let color = fg_remap(color);
         // Rasterise via the axis-aligned path to populate the cache.
         let px = size.round().max(4.0) as u16;
         if !self.icons.contains_key(&(icon, px)) {
@@ -797,6 +860,7 @@ impl Gfx {
 
     /// Draws `text` with its baseline at `baseline`; returns the advance.
     pub fn text(&mut self, font: FontId, px: f32, x: f32, baseline: f32, color: Color, text: &str) -> f32 {
+        let color = fg_remap(color);
         let mut pen = x;
         let mut prev = None;
         let base = baseline.round();

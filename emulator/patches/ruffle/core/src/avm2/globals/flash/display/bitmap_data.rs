@@ -19,7 +19,7 @@ use crate::avm2_stub_method;
 use crate::bitmap::bitmap_data::{BitmapData, ChannelOptions, ThresholdOperation};
 use crate::bitmap::bitmap_data::{BitmapDataDrawError, IBitmapDrawable};
 use crate::bitmap::{is_size_valid, operations};
-use crate::character::{Character, CompressedBitmap};
+use crate::character::{BitmapCharacter, Character};
 use crate::ecma_conversions::round_to_even;
 use crate::swf::BlendMode;
 use ruffle_render::filters::Filter;
@@ -65,21 +65,30 @@ fn get_rectangle_x_y_width_height<'gc>(
 ///
 /// `bd` is assumed to be an uninstantiated library symbol, associated with the
 /// class named by `name`.
+///
+/// RuffleVita: the pixels are shared with every other BitmapData made from
+/// the same symbol until one writes to them, and an image that can't be
+/// decoded (or doesn't fit in memory) gives a transparent BitmapData
+/// instead of a panic.
 pub fn fill_bitmap_data_from_symbol<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    bd: &CompressedBitmap,
+    bd: &BitmapCharacter<'gc>,
 ) -> BitmapData<'gc> {
-    let bitmap = bd.decode().expect("Failed to decode BitmapData");
-    BitmapData::new_with_pixels(
-        activation.context.gc_context,
-        bitmap.width(),
-        bitmap.height(),
-        true,
-        bitmap
-            .as_colors()
-            .map(crate::bitmap::bitmap_data::Color::from)
-            .collect(),
-    )
+    let size = bd.compressed().size();
+    let (width, height) = (u32::from(size.width), u32::from(size.height));
+    match bd.shared_pixels() {
+        Ok(pixels) if pixels.len() == width as usize * height as usize => {
+            BitmapData::new_with_shared_pixels(activation.gc(), width, height, true, pixels)
+        }
+        Ok(_) => {
+            tracing::error!("Decoded BitmapData doesn't match its size {width}x{height}");
+            BitmapData::new(activation.gc(), width, height, true, 0)
+        }
+        Err(e) => {
+            tracing::error!("Failed to decode BitmapData ({width}x{height}): {e:?}");
+            BitmapData::new(activation.gc(), width, height, true, 0)
+        }
+    }
 }
 
 /// Implements `flash.display.BitmapData`'s 'init' method (invoked from the AS3 constructor)
@@ -109,7 +118,7 @@ pub fn init<'gc>(
 
     let new_bitmap_data = if let Some(Character::Bitmap(bitmap)) = character {
         // Instantiating BitmapData from an Animate-style bitmap asset
-        fill_bitmap_data_from_symbol(activation, bitmap.compressed())
+        fill_bitmap_data_from_symbol(activation, &bitmap)
     } else {
         if character.is_some() {
             //TODO: Determine if mismatched symbols will still work as a

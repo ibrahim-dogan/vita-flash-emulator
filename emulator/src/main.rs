@@ -85,6 +85,11 @@ pub static NEWLIB_HEAP_SIZE_USER: u32 = 240 * 1024 * 1024;
 
 fn main() {
     let body = || {
+        // The stack this runs on: 4 MiB below (Vita, see below) or macOS's
+        // 8 MiB main thread. RUFFLEVITA_TEST_STACK_KB pretends it's smaller.
+        let stack = if cfg!(target_os = "vita") { 4 << 20 } else { 8 << 20 };
+        let stack = std::env::var("RUFFLEVITA_TEST_STACK_KB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(stack, |kb| kb << 10);
+        ruffle_core::rv_stack::set_stack_size(stack);
         if let Err(e) = run() {
             tracing::error!("Fatal: {e:#}");
             eprintln!("Fatal: {e:#}");
@@ -157,6 +162,9 @@ fn init_logging() {
         // Warnings and our own messages only: every log line is a memory card write.
         let filter = EnvFilter::builder().parse_lossy("error,rufflevita=info");
         let path = platform::data_dir().join("log.txt");
+        // Keep the previous run's log: after a crash, the next start would
+        // otherwise overwrite what happened.
+        let _ = std::fs::rename(&path, platform::data_dir().join("log.prev.txt"));
         if let Ok(file) = std::fs::File::create(path) {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
@@ -176,7 +184,29 @@ fn init_logging() {
     std::panic::set_hook(Box::new(|info| {
         tracing::error!("Panic: {info}");
         eprintln!("Panic: {info}");
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        *LAST_PANIC.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
     }));
+}
+
+/// The message of the last panic, for the "game crashed" notice.
+#[cfg(feature = "heapcount")]
+#[global_allocator]
+static HEAP: platform::heapcount::Counting = platform::heapcount::Counting;
+
+static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+const OUT_OF_MEMORY: &str = "out of memory";
+
+/// Runs `f`, turning a panic into `None`. A broken game (or a Ruffle bug it
+/// hits) then ends that game instead of the whole app.
+fn guarded<R>(f: impl FnOnce() -> R) -> Option<R> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }
 
 fn run() -> anyhow::Result<()> {
@@ -191,8 +221,16 @@ fn run() -> anyhow::Result<()> {
     std::alloc::set_alloc_error_hook(|layout| {
         let memory = platform::memory_summary().unwrap_or_default();
         tracing::error!("Out of memory allocating {} bytes \u{b7} {memory}", layout.size());
+        // Unwind to the frame guard, which ends the game and frees its memory.
+        panic!("{OUT_OF_MEMORY} ({} bytes)", layout.size());
     });
     let _ = ruffle_render_glow::MEMORY_PROBE.set(platform::memory_summary);
+    #[cfg(target_os = "vita")]
+    let _ = ruffle_render_glow::GPU_FREE.set(platform::gpu_free);
+    #[cfg(feature = "heapcount")]
+    if let Some(mb) = std::env::var("RUFFLEVITA_HEAP_LIMIT_MB").ok().and_then(|v| v.parse().ok()) {
+        platform::heapcount::set_limit_mb(mb);
+    }
     platform::init_hardware();
     tracing::info!("RuffleVita {} starting", env!("CARGO_PKG_VERSION"));
     if let Some(migrated) = migrated {
@@ -260,6 +298,9 @@ fn run() -> anyhow::Result<()> {
     });
 
     let settings = Settings::load();
+    // Dark theme for the launcher UI (RUFFLEVITA_DARK overrides, for testing).
+    let dark = std::env::var("RUFFLEVITA_DARK").ok().map_or(settings.dark_mode, |v| v == "1");
+    ui::gfx::set_dark(dark);
     let _ = video.gl_set_swap_interval(if settings.vsync { 1 } else { 0 });
     if std::env::var_os("RUFFLEVITA_BENCH").is_some() {
         let _ = video.gl_set_swap_interval(0);
@@ -447,7 +488,10 @@ impl App {
             let live = matches!(self.mode, Mode::Playing) && self.modal.is_none();
             let events = self.input.drain(!live);
             if live {
-                self.frame_game(&events, dt);
+                if guarded(|| self.frame_game(&events, dt)).is_none() {
+                    self.game_crashed();
+                    continue;
+                }
                 let shot = match shot {
                     None if self.recorder.as_ref().is_some_and(|r| r.due()) => Some(String::new()),
                     s => s,
@@ -602,7 +646,9 @@ impl App {
             .map(|g| backends::navigator::path_to_url(&g.path))
             .unwrap_or_default();
         let profile = self.settings.load_profile(&key);
-        match Session::new(self.gl.clone(), &self.audio, &self.window, movie, &url, key.clone(), name, profile) {
+        let started = guarded(|| Session::new(self.gl.clone(), &self.audio, &self.window, movie, &url, key.clone(), name, profile))
+            .unwrap_or_else(|| Err(crash_message()));
+        match started {
             Ok(mut s) => {
                 // Don't overwrite a cover the user picked.
                 s.auto_cover_taken = self.lib.games.iter().any(|g| g.key == key && g.db.screenshot);
@@ -615,6 +661,25 @@ impl App {
                 ls.error = Some(e);
             }
         }
+    }
+
+    /// The game panicked: end it, and say so back in the library.
+    fn game_crashed(&mut self) {
+        let name = self.session.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        tracing::error!("{name} crashed; back to the library");
+        // Its state may be half-updated; if dropping it panics too, leak the rest.
+        if let Some(session) = self.session.take() {
+            if guarded(|| drop(session)).is_none() {
+                tracing::error!("Couldn't free the crashed game");
+            }
+        }
+        unsafe {
+            use glow::HasContext;
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+        self.quit_to_library();
+        self.toast = Some(Toast::lasting(format!("{name} stopped: {}", crash_message()), 8000));
     }
 
     fn quit_to_library(&mut self) {
@@ -941,5 +1006,18 @@ impl App {
             t.draw(g);
         }
         g.flush();
+    }
+}
+
+/// What the last panic said, for the player.
+pub(crate) fn crash_message() -> String {
+    let message = LAST_PANIC.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    let message = message.lines().next().unwrap_or("").trim();
+    if message.starts_with(OUT_OF_MEMORY) {
+        "it ran out of memory".to_owned()
+    } else if message.is_empty() {
+        "it hit an error RuffleVita can't handle".to_owned()
+    } else {
+        format!("it hit an error ({})", message.chars().take(80).collect::<String>())
     }
 }

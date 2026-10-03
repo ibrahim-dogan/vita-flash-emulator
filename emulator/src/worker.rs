@@ -126,7 +126,9 @@ fn run(shared: Arc<Shared>, tx: Sender<Done>) {
         };
         match job {
             Job::Analyze { key, path, want_info, want_cover } => {
-                let info = swfinfo::read_info(&path);
+                // A broken SWF must not take the worker thread down.
+                let info = std::panic::catch_unwind(|| swfinfo::read_info(&path))
+                    .unwrap_or_else(|_| Err("The file is damaged".to_owned()));
                 let stage = info.as_ref().map(|i| (i.width, i.height)).unwrap_or((550, 400));
                 let ok = info.is_ok();
                 if want_info {
@@ -134,7 +136,7 @@ fn run(shared: Arc<Shared>, tx: Sender<Done>) {
                 }
                 let try_cover = want_cover && ok;
                 if try_cover {
-                    let thumb = swfinfo::extract_cover(&path, stage).map(|img| {
+                    let thumb = std::panic::catch_unwind(|| swfinfo::extract_cover(&path, stage)).ok().flatten().map(|img| {
                         let small = swfinfo::downscale(&img, thumbs::THUMB_W, thumbs::THUMB_H);
                         if let Err(e) = thumbs::save(&key, &small, ThumbKind::Extracted) {
                             tracing::warn!("Couldn't save cover for {key}: {e}");
@@ -160,7 +162,10 @@ fn run(shared: Arc<Shared>, tx: Sender<Done>) {
                 }
             }
             Job::LoadMovie { path, url } => {
-                send(Done::Movie(load_movie(&path, url, &send)));
+                // A broken SWF must not take the worker thread (and the app) down.
+                let movie = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_movie(&path, url, &send)))
+                    .unwrap_or_else(|_| Err(format!("Couldn't open it: {}", crate::crash_message())));
+                send(Done::Movie(movie));
             }
         }
     }

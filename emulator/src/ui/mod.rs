@@ -50,6 +50,11 @@ pub mod theme {
     pub const SHADOW: f32 = 5.0;
     pub const RADIUS: f32 = 14.0;
 
+    /// Text/icons drawn on a light accent fill (the yellow selection, the
+    /// logo), kept dark in both themes. Distinct from `INK` so the dark-mode
+    /// text remap leaves it alone (see `gfx::fg_remap`).
+    pub const ON_ACCENT: Color = Color::hex(0x121426);
+
     /// Cover colours for games without art, picked by name.
     pub const COVERS: [u32; 8] = [0xFF5A3C, 0x8E5BD8, 0x20A37A, 0xE8883A, 0x3B7BE0, 0xD14B8F, 0x5C9E2E, 0xC9A227];
 }

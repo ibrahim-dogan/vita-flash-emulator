@@ -10,6 +10,7 @@ use ruffle_render::bitmap::{
 };
 use ruffle_wstr::WStr;
 use std::cell::{OnceCell, Ref};
+use std::sync::Arc;
 use std::fmt::Debug;
 use std::ops::Range;
 use swf::{Rectangle, Twips};
@@ -251,6 +252,21 @@ impl<'gc> BitmapData<'gc> {
         Self(data)
     }
 
+    /// RuffleVita: a BitmapData whose pixels are shared until written (see
+    /// `BitmapRawData::shared`).
+    pub fn new_with_shared_pixels(
+        mc: &Mutation<'gc>,
+        width: u32,
+        height: u32,
+        transparency: bool,
+        pixels: Arc<[Color]>,
+    ) -> Self {
+        let mut data = BitmapRawData::new(width, height, transparency, 0);
+        data.fill = Color::default();
+        data.shared = Some(pixels);
+        Self(BitmapRawDataWrapper::new(Gc::new(mc, data.into())))
+    }
+
     pub fn dummy(mc: &Mutation<'gc>) -> Self {
         Self(BitmapRawDataWrapper::dummy(mc))
     }
@@ -373,6 +389,13 @@ pub struct BitmapRawData<'gc> {
     #[collect(require_static)]
     pixels: OnceCell<Vec<Color>>,
 
+    /// RuffleVita: pixels shared with other BitmapDatas made from the same
+    /// library symbol, read while `pixels` is not allocated and copied into
+    /// it on the first write. Games create the same embedded image hundreds
+    /// of times, and a copy for each one runs the Vita out of memory.
+    #[collect(require_static)]
+    shared: Option<Arc<[Color]>>,
+
     /// The color of every pixel while `pixels` is not allocated.
     #[collect(require_static)]
     fill: Color,
@@ -485,6 +508,7 @@ mod wrapper {
                 mc,
                 BitmapRawData {
                     pixels: OnceCell::new(),
+                    shared: None,
                     fill: Color::default(),
                     width: 0,
                     height: 0,
@@ -509,6 +533,7 @@ mod wrapper {
             let data = self.sync(renderer).borrow();
             BitmapRawData {
                 pixels: data.pixels.clone(),
+                shared: data.shared.clone(),
                 fill: data.fill,
                 width: data.width,
                 height: data.height,
@@ -747,6 +772,7 @@ impl<'gc> BitmapRawData<'gc> {
     pub fn new(width: u32, height: u32, transparency: bool, fill_color: u32) -> Self {
         Self {
             pixels: OnceCell::new(),
+            shared: None,
             fill: Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency),
             width,
             height,
@@ -769,6 +795,7 @@ impl<'gc> BitmapRawData<'gc> {
     ) -> Self {
         Self {
             pixels: OnceCell::from(pixels),
+            shared: None,
             fill: Color::default(),
             width,
             height,
@@ -791,6 +818,7 @@ impl<'gc> BitmapRawData<'gc> {
         self.width = 0;
         self.height = 0;
         self.pixels = OnceCell::new(); // free the CPU pixel buffer
+        self.shared = None;
         self.fill = Color::default();
         self.bitmap_handle = None;
         // There's no longer a handle to update
@@ -806,7 +834,7 @@ impl<'gc> BitmapRawData<'gc> {
             return Ok(handle.clone());
         }
 
-        let bitmap_handle = match self.pixels.get() {
+        let bitmap_handle = match self.current_pixels() {
             // Still fully transparent: no need for a buffer of zeros.
             None if self.fill == Color::default() => {
                 renderer.create_empty_texture(self.width(), self.height())
@@ -832,8 +860,18 @@ impl<'gc> BitmapRawData<'gc> {
     }
 
     pub fn bitmap_handle(&mut self, renderer: &mut dyn RenderBackend) -> BitmapHandle {
-        self.try_bitmap_handle(renderer)
-            .expect("Failed to register bitmap")
+        // RuffleVita: a texture that can't be registered (out of GPU memory)
+        // must not crash the whole player. Fall back to a 1x1 texture so this
+        // one bitmap is wrong but the game keeps running.
+        match self.try_bitmap_handle(renderer) {
+            Ok(handle) => handle,
+            Err(e) => {
+                tracing::error!("Failed to register a {}x{} bitmap ({e}); using a blank one", self.width(), self.height());
+                renderer
+                    .create_empty_texture(1, 1)
+                    .expect("A 1x1 texture must always fit")
+            }
+        }
     }
 
     pub fn transparency(&self) -> bool {
@@ -883,14 +921,30 @@ impl<'gc> BitmapRawData<'gc> {
         vec![self.fill; self.width as usize * self.height as usize]
     }
 
+    /// The pixels if there are any (own or shared), `None` while every
+    /// pixel is `fill`.
+    fn current_pixels(&self) -> Option<&[Color]> {
+        match self.pixels.get() {
+            Some(pixels) => Some(pixels),
+            None => self.shared.as_deref(),
+        }
+    }
+
     /// The CPU pixels, allocating them if needed.
-    fn cpu_pixels(&self) -> &Vec<Color> {
+    fn cpu_pixels(&self) -> &[Color] {
+        if let Some(pixels) = self.current_pixels() {
+            return pixels;
+        }
         self.pixels.get_or_init(|| self.filled_pixels())
     }
 
     fn cpu_pixels_mut(&mut self) -> &mut Vec<Color> {
         if self.pixels.get().is_none() {
-            let _ = self.pixels.set(self.filled_pixels());
+            let pixels = match self.shared.take() {
+                Some(shared) => shared.to_vec(),
+                None => self.filled_pixels(),
+            };
+            let _ = self.pixels.set(pixels);
         }
         self.pixels.get_mut().expect("pixels were just allocated")
     }
@@ -932,12 +986,13 @@ impl<'gc> BitmapRawData<'gc> {
     pub fn fill(&mut self, color: Color) {
         // Back to a single color: free the pixels until they're needed again.
         self.pixels = OnceCell::new();
+        self.shared = None;
         self.fill = color;
     }
 
     #[inline]
     pub fn get_pixel32_raw(&self, x: u32, y: u32) -> Color {
-        match self.pixels.get() {
+        match self.current_pixels() {
             Some(pixels) => pixels[(x + y * self.width()) as usize],
             None => self.fill,
         }
@@ -958,7 +1013,7 @@ impl<'gc> BitmapRawData<'gc> {
         match &self.dirty_state {
             DirtyState::CpuModified(region) => {
                 let temporary;
-                let rgba = match self.pixels.get() {
+                let rgba = match self.current_pixels() {
                     Some(pixels) => Color::slice_as_rgba(pixels),
                     None => {
                         temporary = self.filled_pixels();

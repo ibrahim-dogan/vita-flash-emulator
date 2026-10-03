@@ -7,7 +7,7 @@ use crate::display_object::DisplayObjectBase;
 use crate::drawing::Drawing;
 use crate::library::MovieLibrarySource;
 use crate::prelude::*;
-use crate::tag_utils::SwfMovie;
+use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::utils::HasPrefixField;
 use crate::vminterface::Instantiator;
 use core::fmt;
@@ -51,16 +51,45 @@ impl<'gc> Graphic<'gc> {
         swf_shape: swf::Shape,
         movie: Arc<SwfMovie>,
     ) -> Self {
-        let library = context.library.library_for_movie(movie.clone()).unwrap();
         let shared = GraphicShared {
             id: swf_shape.id,
             bounds: swf_shape.shape_bounds,
-            render_handle: Some(
-                context
-                    .renderer
-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
-            ),
-            shape: swf_shape,
+            source: None,
+            render_handle: OnceCell::new(),
+            shape: OnceCell::from(swf_shape),
+            movie,
+        };
+
+        Graphic(Gc::new(
+            context.gc(),
+            GraphicData {
+                base: Default::default(),
+                shared: Lock::new(Gc::new(context.gc(), shared)),
+                class: Lock::new(None),
+                avm2_object: Lock::new(None),
+                drawing: OnceCell::new(),
+            },
+        ))
+    }
+
+    /// RuffleVita: construct a `Graphic` from a DefineShape tag that is parsed
+    /// and tessellated only when first drawn or hit-tested. Big games define
+    /// thousands of shapes they never show at once; doing it all at load time
+    /// ran the Vita out of memory.
+    pub fn from_swf_tag_lazy(
+        context: &mut UpdateContext<'gc>,
+        id: CharacterId,
+        bounds: Rectangle<Twips>,
+        source: SwfSlice,
+        version: u8,
+        movie: Arc<SwfMovie>,
+    ) -> Self {
+        let shared = GraphicShared {
+            id,
+            bounds,
+            source: Some((source, version)),
+            render_handle: OnceCell::new(),
+            shape: OnceCell::new(),
             movie,
         };
 
@@ -81,8 +110,9 @@ impl<'gc> Graphic<'gc> {
         let shared = GraphicShared {
             id: 0,
             bounds: Default::default(),
-            render_handle: None,
-            shape: swf::Shape {
+            source: None,
+            render_handle: OnceCell::from(None),
+            shape: OnceCell::from(swf::Shape {
                 version: 32,
                 id: 0,
                 shape_bounds: Default::default(),
@@ -93,7 +123,7 @@ impl<'gc> Graphic<'gc> {
                     line_styles: Vec::new(),
                 },
                 shape: Vec::new(),
-            },
+            }),
             movie: context.root_swf.clone(),
         };
 
@@ -191,7 +221,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 
         if let Some(drawing) = self.0.drawing.get() {
             drawing.borrow().render(context);
-        } else if let Some(render_handle) = self.0.shared.get().render_handle.clone() {
+        } else if let Some(render_handle) = self.0.shared.get().render_handle(context) {
             context
                 .commands
                 .render_shape(render_handle, context.transform_stack.transform())
@@ -217,8 +247,8 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                     return true;
                 }
             } else {
-                let shape = &self.0.shared.get().shape;
-                return ruffle_render::shape_utils::shape_hit_test(shape, point, &local_matrix);
+                let shared = self.0.shared.get();
+                return ruffle_render::shape_utils::shape_hit_test(shared.shape(), point, &local_matrix);
             }
         }
 
@@ -264,8 +294,41 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 #[collect(require_static)]
 struct GraphicShared {
     id: CharacterId,
-    shape: swf::Shape,
-    render_handle: Option<ShapeHandle>,
+    /// RuffleVita: the DefineShape tag (and its version) `shape` is parsed
+    /// from on first use, for shapes made by `from_swf_tag_lazy`.
+    source: Option<(SwfSlice, u8)>,
+    shape: OnceCell<swf::Shape>,
+    render_handle: OnceCell<Option<ShapeHandle>>,
     bounds: Rectangle<Twips>,
     movie: Arc<SwfMovie>,
+}
+
+impl GraphicShared {
+    fn shape(&self) -> &swf::Shape {
+        self.shape.get_or_init(|| {
+            let (source, version) = self.source.as_ref().expect("a lazy shape has its tag");
+            let mut reader = swf::read::Reader::new(source.data(), self.movie.version());
+            reader.read_define_shape(*version).unwrap_or_else(|e| {
+                tracing::error!("Couldn't parse shape {}: {e}", self.id);
+                swf::Shape {
+                    version: *version,
+                    id: self.id,
+                    shape_bounds: self.bounds,
+                    edge_bounds: self.bounds,
+                    flags: swf::ShapeFlag::empty(),
+                    styles: swf::ShapeStyles { fill_styles: Vec::new(), line_styles: Vec::new() },
+                    shape: Vec::new(),
+                }
+            })
+        })
+    }
+
+    fn render_handle(&self, context: &mut RenderContext<'_, '_>) -> Option<ShapeHandle> {
+        self.render_handle
+            .get_or_init(|| {
+                let library = context.library.library_for_movie(self.movie.clone())?;
+                Some(context.renderer.register_shape((self.shape()).into(), &MovieLibrarySource { library }))
+            })
+            .clone()
+    }
 }

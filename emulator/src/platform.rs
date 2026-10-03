@@ -252,8 +252,78 @@ pub fn memory_summary() -> Option<String> {
             vglMemFree(2) / MIB,
         ))
     }
-    #[cfg(not(target_os = "vita"))]
+    #[cfg(all(not(target_os = "vita"), feature = "heapcount"))]
+    {
+        let (now, peak) = heapcount::mb();
+        Some(format!("heap {now}/{peak} MB (peak)"))
+    }
+    #[cfg(all(not(target_os = "vita"), not(feature = "heapcount")))]
     {
         None
     }
+}
+
+/// Development (`heapcount` feature): counts the Rust heap, so desktop runs
+/// show what a game would need of the Vita's heap (desktop RSS also counts
+/// the GPU driver).
+#[cfg(feature = "heapcount")]
+pub mod heapcount {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NOW: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+    static LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// Makes allocations fail above `mb`, like the Vita's heap does.
+    pub fn set_limit_mb(mb: usize) {
+        LIMIT.store(mb << 20, Ordering::Relaxed);
+    }
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if NOW.load(Ordering::Relaxed) + layout.size() > LIMIT.load(Ordering::Relaxed) {
+                return std::ptr::null_mut();
+            }
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                let now = NOW.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                PEAK.fetch_max(now, Ordering::Relaxed);
+            }
+            p
+        }
+        unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(p, layout) };
+            NOW.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+        unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if new_size > layout.size() && NOW.load(Ordering::Relaxed) + new_size - layout.size() > LIMIT.load(Ordering::Relaxed) {
+                return std::ptr::null_mut();
+            }
+            let q = unsafe { System.realloc(p, layout, new_size) };
+            if !q.is_null() {
+                NOW.fetch_sub(layout.size(), Ordering::Relaxed);
+                let now = NOW.fetch_add(new_size, Ordering::Relaxed) + new_size;
+                PEAK.fetch_max(now, Ordering::Relaxed);
+            }
+            q
+        }
+    }
+
+    /// (current, peak) in MB.
+    pub fn mb() -> (usize, usize) {
+        (NOW.load(Ordering::Relaxed) >> 20, PEAK.load(Ordering::Relaxed) >> 20)
+    }
+}
+
+/// Free GPU memory in bytes, across vitaGL's pools (textures fall back from
+/// one to the next).
+#[cfg(target_os = "vita")]
+pub fn gpu_free() -> usize {
+    unsafe extern "C" {
+        fn vglMemFree(kind: i32) -> usize;
+    }
+    unsafe { vglMemFree(0) + vglMemFree(1) + vglMemFree(2) }
 }
