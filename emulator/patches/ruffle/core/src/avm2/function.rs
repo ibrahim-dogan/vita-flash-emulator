@@ -187,6 +187,30 @@ impl<'a, 'gc> Iterator for FunctionArgsIter<'a, 'gc> {
 ///
 /// It is the caller's responsibility to ensure that the `receiver` passed
 /// to this method is not Value::Null or Value::Undefined.
+/// RuffleVita: the optional cap on Box2D's velocity/position iteration counts,
+/// from `RUFFLEVITA_PHYS_ITERS` (0 = off). A lower cap makes physics-heavy
+/// games run faster with visibly looser physics; it changes behaviour, so it
+/// is opt-in and read once. See `Method::is_box2d_step`.
+static APP_PHYS_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Set by the app from the per-game "Physics speed" setting (0 = no cap). The
+/// `RUFFLEVITA_PHYS_ITERS` environment variable, when set, overrides it (used
+/// in timedemos and A/B tests).
+pub fn set_phys_iter_cap(cap: u32) {
+    APP_PHYS_CAP.store(cap, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn phys_iter_cap() -> u32 {
+    use std::sync::OnceLock;
+    static ENV: OnceLock<Option<u32>> = OnceLock::new();
+    if let Some(v) = *ENV.get_or_init(|| {
+        std::env::var("RUFFLEVITA_PHYS_ITERS").ok().and_then(|v| v.parse::<u32>().ok())
+    }) {
+        return v;
+    }
+    APP_PHYS_CAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn exec<'gc>(
     method: Method<'gc>,
     scope: ScopeChain<'gc>,
@@ -197,6 +221,30 @@ pub fn exec<'gc>(
     callee: Option<FunctionObject<'gc>>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mc = activation.gc();
+
+    // RuffleVita: cap the iteration counts of b2World.Step. The first argument
+    // is the time step (a small float, left alone); every later argument is an
+    // iteration count (one in Box2D 2.0's `Step(dt, iterations)`, two in 2.1's
+    // `Step(dt, velocityIterations, positionIterations)`).
+    let cap = phys_iter_cap();
+    let clamped_storage;
+    let arguments = if cap > 0 && arguments.len() >= 2 && method.is_box2d_step() {
+        let mut v = arguments.to_slice().into_owned();
+        for slot in v.iter_mut().skip(1) {
+            let over = match *slot {
+                Value::Integer(x) => x > cap as i32,
+                Value::Number(x) => x > cap as f64,
+                _ => false,
+            };
+            if over {
+                *slot = Value::Integer(cap as i32);
+            }
+        }
+        clamped_storage = v;
+        FunctionArgs::from_slice(&clamped_storage)
+    } else {
+        arguments
+    };
 
     let ret = match method.method_kind() {
         MethodKind::Native { native_method, .. } => {
@@ -244,6 +292,10 @@ pub fn exec<'gc>(
         }
         MethodKind::Bytecode { .. } => {
             crate::rv_deep_zone!(Avm2CallSetup);
+            // RuffleVita: throw like Flash instead of overflowing the native stack.
+            if crate::rv_stack::exhausted() {
+                return Err(stack_overflow(activation));
+            }
             // We must initialize the stack frame here so the lifetime works out
             let stack = activation.context.avm2.stack;
             let stack_frame = stack.get_stack_frame(method);
@@ -373,4 +425,14 @@ pub fn display_function<'gc>(output: &mut WString, method: Method<'gc>) {
     }
 
     output.push_utf8("()");
+}
+
+/// RuffleVita: "Error #1023: Stack overflow occurred." (see `rv_stack`).
+#[cold]
+#[inline(never)]
+pub(crate) fn stack_overflow<'gc>(activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+    match crate::avm2::error::error(activation, "Error #1023: Stack overflow occurred.", 1023) {
+        Ok(err) => Error::avm_error(err),
+        Err(err) => err,
+    }
 }

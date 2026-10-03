@@ -129,6 +129,32 @@ impl Quality {
     }
 }
 
+/// Per-game physics speed. `Fast` caps the iteration counts of Box2D's
+/// `b2World.Step`, which makes physics-heavy games (wheelchair/bike/ragdoll
+/// games) run faster at the cost of slightly looser, bouncier physics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicsMode {
+    Normal,
+    Fast,
+}
+
+impl PhysicsMode {
+    pub const ALL: [PhysicsMode; 2] = [PhysicsMode::Normal, PhysicsMode::Fast];
+    pub fn label(self) -> &'static str {
+        match self {
+            PhysicsMode::Normal => "Normal",
+            PhysicsMode::Fast => "Fast (looser)",
+        }
+    }
+    /// The iteration cap passed to the engine (0 = no cap).
+    pub fn iteration_cap(self) -> u32 {
+        match self {
+            PhysicsMode::Normal => 0,
+            PhysicsMode::Fast => 3,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
@@ -137,6 +163,7 @@ pub struct Profile {
     pub right_stick: StickMode,
     pub scale: ScaleMode,
     pub quality: Quality,
+    pub physics: PhysicsMode,
     pub show_fps: bool,
     /// Virtual cursor speed, 1..=10.
     pub cursor_speed: u8,
@@ -166,6 +193,7 @@ impl Default for Profile {
             right_stick: StickMode::Mouse,
             scale: ScaleMode::Fit,
             quality: Quality::High,
+            physics: PhysicsMode::Normal,
             show_fps: false,
             cursor_speed: 5,
             rear_touch: false,
@@ -211,6 +239,8 @@ pub struct Settings {
     pub sort: Sort,
     pub last_game: Option<String>,
     pub vsync: bool,
+    /// Dark theme for the launcher UI (all games).
+    pub dark_mode: bool,
     /// Template for games that have no profile of their own yet.
     pub default_profile: Profile,
 }
@@ -221,6 +251,7 @@ impl Default for Settings {
             sort: Sort::Recent,
             last_game: None,
             vsync: true,
+            dark_mode: false,
             default_profile: Profile::default(),
         }
     }

@@ -44,6 +44,8 @@ opstats = ["ruffle_core/rv_opstats"]
 prof = ["ruffle_core/rv_outline"]
 # Vita profiling build: rv_prof also covers AVM2 code (methods and ops).
 prof_ops = ["ruffle_core/rv_prof_ops"]
+# Development: count the Rust heap (see platform::heapcount).
+heapcount = []
 
 [target.armv7-sony-vita-newlibeabihf.dependencies]
 vitasdk-sys = { version = "0.3.2", features = [
@@ -69,7 +71,7 @@ ruffle_common = { path = "patches/ruffle/core/common" }
 title_id = "RUFFLEVIT"
 title_name = "RuffleVita"
 assets = "./static/vita"
-build_std = "std,panic_abort"
+build_std = "std,panic_unwind"
 
 [package.metadata.vita.profile.vita]
 strip_symbols = true
@@ -84,7 +86,7 @@ opt-level = 3
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 
 [profile.vita]
 inherits = "release"

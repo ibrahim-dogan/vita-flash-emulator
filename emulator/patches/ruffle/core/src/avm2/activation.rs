@@ -3442,6 +3442,7 @@ impl<'gc> Activation<'_, 'gc> {
             Op::TypeOf => self.op_type_of(),
             Op::Coerce { class } => self.op_coerce(*class),
             Op::CoerceSwapPop { class } => self.op_coerce_swap_pop(*class),
+            Op::GetScopeObject { index } => self.op_get_scope_object(*index),
             Op::Throw => self.op_throw(),
             _ => return Ok(false),
         }?;

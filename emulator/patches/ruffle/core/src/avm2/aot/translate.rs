@@ -151,7 +151,7 @@ fn effect(op: &Op<'_>) -> Result<(usize, usize, Flow, Vec<usize>), String> {
         Op::Nop | Op::Kill { .. } | Op::IncLocal { .. } | Op::IncLocalI { .. } | Op::DecLocal { .. } | Op::DecLocalI { .. } | Op::CoerceA => (0, 0, Next, vec![]),
         Op::PushDouble { .. } | Op::PushShort { .. } | Op::PushInt { .. } | Op::PushUint { .. } | Op::PushTrue | Op::PushFalse
         | Op::PushNull | Op::PushUndefined | Op::PushString { .. } | Op::PushNamespace { .. } | Op::GetLocal { .. }
-        | Op::GetLocalSlot { .. } | Op::GetScriptGlobals { .. } | Op::GetOuterScope { .. } => (0, 1, Next, vec![]),
+        | Op::GetLocalSlot { .. } | Op::GetScriptGlobals { .. } | Op::GetOuterScope { .. } | Op::GetScopeObject { .. } => (0, 1, Next, vec![]),
         Op::GetLocal2 { .. } => (0, 2, Next, vec![]),
         Op::SetLocal { .. } | Op::Pop | Op::PushScope | Op::PushWith => (1, 0, Next, vec![]),
         Op::PopScope => (0, 0, Next, vec![]),
@@ -219,7 +219,7 @@ fn delegated(op: &Op<'_>) -> bool {
             | Op::Construct { .. } | Op::ConstructProp { .. } | Op::ConstructSlot { .. } | Op::ConstructSuper { .. }
             | Op::NewObject { .. } | Op::NewFunction { .. } | Op::ApplyType { .. } | Op::NewArray { .. } | Op::CoerceO | Op::CoerceS
             | Op::ConvertO | Op::ConvertS | Op::IsType { .. } | Op::IsTypeLate | Op::AsType { .. } | Op::AsTypeLate
-            | Op::InstanceOf | Op::TypeOf | Op::Coerce { .. } | Op::CoerceSwapPop { .. }
+            | Op::InstanceOf | Op::TypeOf | Op::Coerce { .. } | Op::CoerceSwapPop { .. } | Op::GetScopeObject { .. }
     )
 }
 

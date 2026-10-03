@@ -54,6 +54,7 @@ mod events;
 mod filters;
 mod flv;
 mod function;
+pub use function::set_phys_iter_cap;
 pub mod globals;
 mod metadata;
 mod method;

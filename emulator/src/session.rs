@@ -79,6 +79,10 @@ pub struct Session {
     fps_frames: u32,
     fps_since: Instant,
     running: bool,
+    /// When shared objects were last written to disk, for the periodic
+    /// autosave (games that save on exit still persist if the Vita is powered
+    /// off or crashes mid-game).
+    last_autosave: Instant,
     pub fps: f32,
     perf: PerfTotals,
     /// Per-frame breakdown shown under the FPS counter.
@@ -113,6 +117,9 @@ impl Session {
         let missing = MissingFiles::default();
         let navigator = LocalNavigator::new(&executor, movie_url, missing.clone());
         let storage = DiskStorageBackend::new(platform::saves_dir());
+
+        // RuffleVita: apply the per-game physics speed before the movie runs.
+        ruffle_core::set_phys_iter_cap(profile.physics.iteration_cap());
 
         let (scale, force) = scale_mode(profile.scale);
         let builder = PlayerBuilder::new();
@@ -166,6 +173,7 @@ impl Session {
             fps_frames: 0,
             fps_since: now,
             running: true,
+            last_autosave: now,
             fps: 0.0,
             perf: PerfTotals::default(),
             perf_line: String::new(),
@@ -191,6 +199,9 @@ impl Session {
         }
         if old.quality != self.profile.quality {
             player.set_quality(self.profile.quality.stage_quality());
+        }
+        if old.physics != self.profile.physics {
+            ruffle_core::set_phys_iter_cap(self.profile.physics.iteration_cap());
         }
     }
 
@@ -494,7 +505,19 @@ impl Session {
         let instr_before = if self.bench.is_some() { instructions_retired() } else { 0 };
         let mut player = self.player.lock().unwrap();
         let dt = if self.bench.is_some() { 1000.0 / player.frame_rate() } else { dt };
+        // Development: RUFFLEVITA_TEST_PANIC=<frame> fakes a crash, to test recovery.
+        static TEST_PANIC: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        if *TEST_PANIC.get_or_init(|| std::env::var("RUFFLEVITA_TEST_PANIC").ok().and_then(|v| v.parse().ok())) == Some(self.frames) {
+            panic!("RUFFLEVITA_TEST_PANIC at frame {}", self.frames);
+        }
         player.tick(dt);
+        // Periodic autosave: write shared objects to disk every 30 s so a
+        // power-off or crash mid-game keeps progress, even for games that only
+        // save on exit. Skipped in timedemo mode. (Also flushed on pause/close.)
+        if self.bench.is_none() && self.last_autosave.elapsed() >= Duration::from_secs(30) {
+            player.flush_shared_objects();
+            self.last_autosave = Instant::now();
+        }
         drop(player);
         let spent = now.elapsed();
         self.perf.tick += spent;
@@ -648,6 +671,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         if let Ok(mut player) = self.player.lock() {
             player.flush_shared_objects();
+        }
+        if let Some(mem) = crate::platform::memory_summary() {
+            tracing::info!("{} ended \u{b7} {mem}", self.key);
         }
     }
 }

@@ -18,6 +18,7 @@ extern crate num_derive;
 mod avm1;
 mod avm2;
 pub mod rv_clock;
+pub mod rv_stack;
 pub use rv_prof;
 
 /// RuffleVita: an `rv_prof` zone that only exists in profiling builds
@@ -31,6 +32,8 @@ macro_rules! rv_deep_zone {
 pub(crate) use rv_deep_zone;
 #[cfg(feature = "rv_opstats")]
 pub use avm2::opstats;
+/// RuffleVita: the per-game physics iteration cap (see `avm2::function`).
+pub use avm2::set_phys_iter_cap;
 mod avm_rng;
 mod binary_data;
 pub mod bitmap;

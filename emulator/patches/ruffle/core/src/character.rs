@@ -1,4 +1,5 @@
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::sync::{Arc, Weak};
 
 use crate::backend::audio::SoundHandle;
 use crate::binary_data::BinaryData;
@@ -39,6 +40,10 @@ pub struct BitmapCharacter<'gc> {
     /// A lazily constructed GPU handle, used when performing fills with this bitmap
     #[collect(require_static)]
     handle: OnceCell<BitmapHandle>,
+    /// RuffleVita: the decoded pixels, while some BitmapData made from this
+    /// symbol still shares them (see `BitmapRawData::shared`).
+    #[collect(require_static)]
+    shared_pixels: RefCell<Option<Weak<[crate::bitmap::bitmap_data::Color]>>>,
     /// The bitmap class set by `SymbolClass` - this is used when we instantaite
     /// a `Bitmap` displayobject.
     avm2_class: Lock<BitmapClass<'gc>>,
@@ -49,12 +54,25 @@ impl<'gc> BitmapCharacter<'gc> {
         Self {
             compressed,
             handle: OnceCell::default(),
+            shared_pixels: RefCell::new(None),
             avm2_class: Lock::new(BitmapClass::NoSubclass),
         }
     }
 
     pub fn compressed(&self) -> &CompressedBitmap {
         &self.compressed
+    }
+
+    /// RuffleVita: the decoded pixels for a new BitmapData, decoded once and
+    /// shared by every BitmapData made from this symbol until it writes to them.
+    pub fn shared_pixels(&self) -> Result<Arc<[crate::bitmap::bitmap_data::Color]>, RenderError> {
+        if let Some(pixels) = self.shared_pixels.borrow().as_ref().and_then(Weak::upgrade) {
+            return Ok(pixels);
+        }
+        let bitmap = self.compressed.decode()?;
+        let pixels: Arc<[_]> = bitmap.as_colors().map(crate::bitmap::bitmap_data::Color::from).collect();
+        *self.shared_pixels.borrow_mut() = Some(Arc::downgrade(&pixels));
+        Ok(pixels)
     }
 
     pub fn avm2_class(&self) -> BitmapClass<'gc> {
