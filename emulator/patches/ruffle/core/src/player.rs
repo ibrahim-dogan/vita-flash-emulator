@@ -2004,6 +2004,7 @@ impl Player {
     #[instrument(level = "debug", skip_all)]
     pub fn run_frame(&mut self) {
         let _zone = crate::rv_prof::zone(crate::rv_prof::Zone::RunFrame);
+        crate::rv_lenient::new_frame();
         let frame_time = self.frame_time(750_000_000.0);
         let frame_time = Duration::from_nanos(frame_time as u64);
         let (mut execution_limit, may_execute_while_streaming) = match self.load_behavior {

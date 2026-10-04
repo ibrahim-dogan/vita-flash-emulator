@@ -67,6 +67,10 @@ pub fn set_dark(on: bool) {
     DARK.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub fn is_dark() -> bool {
+    dark()
+}
+
 fn dark() -> bool {
     DARK.load(std::sync::atomic::Ordering::Relaxed)
 }

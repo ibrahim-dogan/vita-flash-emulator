@@ -55,6 +55,11 @@ pub mod theme {
     /// text remap leaves it alone (see `gfx::fg_remap`).
     pub const ON_ACCENT: Color = Color::hex(0x121426);
 
+    /// Text/icon colour for a fill: `INK` on paper, `ON_ACCENT` on colour.
+    pub fn ink_on(fill: Color) -> Color {
+        if fill == PAPER || fill == PAPER_DIM { INK } else { ON_ACCENT }
+    }
+
     /// Cover colours for games without art, picked by name.
     pub const COVERS: [u32; 8] = [0xFF5A3C, 0x8E5BD8, 0x20A37A, 0xE8883A, 0x3B7BE0, 0xD14B8F, 0x5C9E2E, 0xC9A227];
 }
@@ -90,8 +95,11 @@ pub fn card_with(g: &mut Gfx, r: Rect, radius: f32, fill: Color, border: f32, sh
 
 /// Text with a hard ink shadow, for titles on the blue background.
 pub fn shadow_text(g: &mut Gfx, font: FontId, px: f32, x: f32, cy: f32, color: Color, s: &str) -> f32 {
-    let d = (px / 11.0).clamp(2.0, 4.0).round();
-    g.text_mid(font, px, x + d, cy + d, theme::INK, s);
+    // Flat in dark mode: the shadow only reads on the blue background.
+    if !gfx::is_dark() {
+        let d = (px / 11.0).clamp(2.0, 4.0).round();
+        g.text_mid(font, px, x + d, cy + d, theme::INK, s);
+    }
     g.text_mid(font, px, x, cy, color, s)
 }
 
@@ -107,7 +115,7 @@ pub fn logo(g: &mut Gfx, r: Rect) {
     card_with(g, r, (r.w * 0.26).round(), theme::SUN, border, shadow);
     let s = (r.w * 0.56).round();
     let (x, y) = (r.x + (r.w - s) * 0.5 + r.w * 0.04, r.y + (r.h - s) * 0.5);
-    g.icon(Icon::Play, x, y, s, theme::INK);
+    g.icon(Icon::Play, x, y, s, theme::ON_ACCENT);
 }
 
 /// Width of [`wordmark`] at `size`.
@@ -131,7 +139,7 @@ pub fn chip(g: &mut Gfx, x: f32, y: f32, text: &str, fill: Color) -> f32 {
     let w = g.measure(FontId::Bold, 13.0, text) + 18.0;
     let r = Rect::new(x, y, w.round(), 26.0);
     g.rounded_outline(r, 7.0, 2.0, theme::INK, fill);
-    g.text_mid_center(FontId::Bold, 13.0, r.center_x(), r.center_y(), theme::INK, text);
+    g.text_mid_center(FontId::Bold, 13.0, r.center_x(), r.center_y(), theme::ink_on(fill), text);
     r.w
 }
 
@@ -149,8 +157,20 @@ pub fn progress_bar(g: &mut Gfx, r: Rect, p: f32, left: &str, right: &str) {
         g.pop_clip();
         g.round_corners(inner, 7.0, theme::INK);
     }
-    g.text_mid(FontId::Bold, 14.0, inner.x + 12.0, inner.center_y(), theme::INK, left);
-    g.text_mid_right(FontId::Bold, 14.0, inner.right() - 12.0, inner.center_y(), theme::INK, right);
+    // Dark text over the mint fill, normal ink over the track.
+    let split = inner.x + w;
+    for (clip, color) in [
+        (Rect::new(inner.x, inner.y, w, inner.h), theme::ON_ACCENT),
+        (Rect::new(split, inner.y, inner.right() - split, inner.h), theme::INK),
+    ] {
+        if clip.w <= 0.0 {
+            continue;
+        }
+        g.push_clip(clip);
+        g.text_mid(FontId::Bold, 14.0, inner.x + 12.0, inner.center_y(), color, left);
+        g.text_mid_right(FontId::Bold, 14.0, inner.right() - 12.0, inner.center_y(), color, right);
+        g.pop_clip();
+    }
 }
 
 /// "Library / Explore" style tabs with L and R glyphs on either side.
@@ -166,7 +186,7 @@ pub fn tabs(g: &mut Gfx, x: f32, cy: f32, names: &[&str], active: usize) -> Vec<
         let r = Rect::new(x, cy - 18.0, w.round(), 36.0);
         let on = i == active;
         card_with(g, r, 11.0, if on { theme::SUN } else { theme::PAPER }, theme::BORDER, 3.0);
-        g.text_mid_center(FontId::Display, 19.0, r.center_x(), r.center_y() + 1.0, theme::INK, name);
+        g.text_mid_center(FontId::Display, 19.0, r.center_x(), r.center_y() + 1.0, if on { theme::ON_ACCENT } else { theme::INK }, name);
         rects.push(r);
         x += r.w + 10.0;
     }
@@ -400,7 +420,7 @@ impl Toast {
         let w = g.measure(FontId::Bold, 15.0, &self.text) + 40.0;
         let r = Rect::new(((SCREEN_W as f32 - w) * 0.5).round(), (16.0 - out * 70.0).round(), w.round(), 38.0);
         card_with(g, r, 12.0, theme::SUN, theme::BORDER, 4.0);
-        g.text_mid_center(FontId::Bold, 15.0, r.center_x(), r.center_y(), theme::INK, &self.text);
+        g.text_mid_center(FontId::Bold, 15.0, r.center_x(), r.center_y(), theme::ON_ACCENT, &self.text);
     }
 }
 

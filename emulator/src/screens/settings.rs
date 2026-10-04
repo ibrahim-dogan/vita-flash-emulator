@@ -34,6 +34,7 @@ enum Row {
     CursorSpeed,
     RearTouch,
     VSync,
+    DarkMode,
     MakeDefault,
 }
 
@@ -46,6 +47,7 @@ pub struct SettingsScreen {
     pub game_name: String,
     pub profile: Profile,
     pub vsync: bool,
+    pub dark_mode: bool,
     tab: Tab,
     cursor: usize,
     scroll: f32,
@@ -55,11 +57,12 @@ pub struct SettingsScreen {
 }
 
 impl SettingsScreen {
-    pub fn new(game_name: String, profile: Profile, vsync: bool) -> Self {
+    pub fn new(game_name: String, profile: Profile, vsync: bool, dark_mode: bool) -> Self {
         Self {
             game_name,
             profile,
             vsync,
+            dark_mode,
             tab: Tab::Controls,
             cursor: 0,
             scroll: 0.0,
@@ -86,6 +89,7 @@ impl SettingsScreen {
                 Row::CursorSpeed,
                 Row::RearTouch,
                 Row::VSync,
+                Row::DarkMode,
                 Row::MakeDefault,
             ],
         }
@@ -113,6 +117,11 @@ impl SettingsScreen {
             Row::ShowFps => p.show_fps = !p.show_fps,
             Row::RearTouch => p.rear_touch = !p.rear_touch,
             Row::VSync => self.vsync = !self.vsync,
+            Row::DarkMode => {
+                // Live, so the change shows right away.
+                self.dark_mode = !self.dark_mode;
+                crate::ui::gfx::set_dark(self.dark_mode);
+            }
             Row::CursorSpeed => p.cursor_speed = (p.cursor_speed as i32 + dir).clamp(1, 10) as u8,
             _ => return false,
         }
@@ -261,6 +270,7 @@ impl SettingsScreen {
             Row::ShowFps => (on_off(p.show_fps), true),
             Row::RearTouch => (on_off(p.rear_touch), true),
             Row::VSync => (on_off(self.vsync), true),
+            Row::DarkMode => (on_off(self.dark_mode), true),
             Row::CursorSpeed => (format!("{}", p.cursor_speed), true),
             Row::ResetControls | Row::MakeDefault => (String::new(), false),
         }
@@ -279,6 +289,7 @@ impl SettingsScreen {
             Row::CursorSpeed => ("Stick cursor speed", None),
             Row::RearTouch => ("Rear touchpad as trackpad", Some("Drag to move the cursor, tap to click")),
             Row::VSync => ("V-Sync (all games)", Some("Off can raise FPS but may tear")),
+            Row::DarkMode => ("Dark mode (launcher)", Some("Dark menus and library; games are unaffected")),
             Row::MakeDefault => ("Use these settings for new games", None),
         }
     }
@@ -309,6 +320,7 @@ impl SettingsScreen {
                 continue;
             }
             let selected = i == self.cursor;
+            let ink = if selected { theme::ON_ACCENT } else { theme::INK };
             if selected {
                 g.rounded_outline(r, 10.0, theme::BORDER, theme::INK, theme::SUN);
             }
@@ -320,15 +332,15 @@ impl SettingsScreen {
                     lx += gw.max(24.0) + 12.0;
                 }
                 Row::LeftStick | Row::RightStick => {
-                    g.icon(Icon::Stick, lx, r.center_y() - 12.0, 24.0, theme::INK);
+                    g.icon(Icon::Stick, lx, r.center_y() - 12.0, 24.0, ink);
                     lx += 36.0;
                 }
                 Row::ResetControls => {
-                    g.icon(Icon::Refresh, lx, r.center_y() - 11.0, 22.0, theme::INK);
+                    g.icon(Icon::Refresh, lx, r.center_y() - 11.0, 22.0, ink);
                     lx += 36.0;
                 }
                 Row::MakeDefault => {
-                    g.icon(Icon::Check, lx, r.center_y() - 11.0, 22.0, theme::INK);
+                    g.icon(Icon::Check, lx, r.center_y() - 11.0, 22.0, ink);
                     lx += 36.0;
                 }
                 _ => {}
@@ -336,22 +348,22 @@ impl SettingsScreen {
             let (label, help) = Self::label(*row);
             match (help, selected) {
                 (Some(h), true) => {
-                    g.text_mid(FontId::Bold, 15.5, lx, r.center_y() - 8.0, theme::INK, label);
-                    g.text_mid(FontId::Regular, 12.0, lx, r.center_y() + 10.0, theme::INK.alpha(0.7), h);
+                    g.text_mid(FontId::Bold, 15.5, lx, r.center_y() - 8.0, ink, label);
+                    g.text_mid(FontId::Regular, 12.0, lx, r.center_y() + 10.0, ink.alpha(0.7), h);
                 }
                 _ => {
-                    g.text_mid(FontId::Bold, 15.5, lx, r.center_y(), theme::INK, label);
+                    g.text_mid(FontId::Bold, 15.5, lx, r.center_y(), ink, label);
                 }
             }
 
             let (value, cyclable) = self.value(*row);
             if !value.is_empty() {
                 let right = r.right() - 16.0;
-                let vcolor = if selected { theme::INK } else { theme::MUTED };
+                let vcolor = if selected { ink } else { theme::MUTED };
                 if cyclable && selected {
-                    g.icon(Icon::ChevronRight, right - 16.0, r.center_y() - 8.0, 16.0, theme::INK);
+                    g.icon(Icon::ChevronRight, right - 16.0, r.center_y() - 8.0, 16.0, ink);
                     let w = g.text_mid_right(FontId::Bold, 15.5, right - 22.0, r.center_y(), vcolor, &value);
-                    g.icon(Icon::ChevronLeft, right - 22.0 - w - 22.0, r.center_y() - 8.0, 16.0, theme::INK);
+                    g.icon(Icon::ChevronLeft, right - 22.0 - w - 22.0, r.center_y() - 8.0, 16.0, ink);
                 } else {
                     g.text_mid_right(FontId::Bold, 15.5, right, r.center_y(), vcolor, &value);
                 }

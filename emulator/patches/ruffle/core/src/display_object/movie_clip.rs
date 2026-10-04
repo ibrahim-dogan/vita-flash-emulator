@@ -2918,6 +2918,19 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                         } else {
                             result = None;
                         }
+                    } else if result.is_none() {
+                        // RuffleVita: Flash Player still sends mouse events to
+                        // buttons inside a clip used as a timeline mask (Stick
+                        // War draws its "Start" button as a mask over a colour
+                        // fill, and it must stay clickable).
+                        if let Some(mask) = child.as_interactive() {
+                            if !child.movie().is_action_script_3() {
+                                result = mask.mouse_pick_avm1(context, point, require_button_mode);
+                                if result.is_some() {
+                                    hit_depth = child.depth();
+                                }
+                            }
+                        }
                     }
                 } else if result.is_none() {
                     if let Some(child) = child.as_interactive() {

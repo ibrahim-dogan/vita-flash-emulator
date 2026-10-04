@@ -1139,7 +1139,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         // However, the optimizer can still generate it.
 
         let args = self.stack.get_args(arg_count as usize);
-        let receiver = self.pop_stack().null_check(self, None)?;
+        let receiver = self.pop_stack();
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, None)?;
+            if push_return_value {
+                self.push_stack(Value::Undefined);
+            }
+            return Ok(());
+        }
 
         let value = receiver.call_method_with_args(index, args, self)?;
 
@@ -1165,7 +1172,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             *arg = self.pop_stack();
         }
 
-        let receiver = self.pop_stack().null_check(self, None)?;
+        let receiver = self.pop_stack();
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, None)?;
+            if push_return_value {
+                self.push_stack(Value::Undefined);
+            }
+            return Ok(());
+        }
 
         let value = method(self, receiver, args).expect("FastCall methods should not return Err");
 
@@ -1186,7 +1200,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
+        let receiver = self.pop_stack();
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, Some(&multiname))?;
+            self.push_stack(Value::Undefined);
+            return Ok(());
+        }
 
         let value = receiver.call_property(&multiname, args, self)?;
 
@@ -1205,7 +1224,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
+        let receiver = self.pop_stack();
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, Some(&multiname))?;
+            self.push_stack(Value::Undefined);
+            return Ok(());
+        }
         let function = receiver.get_property(&multiname, self)?;
         let value = function.call(self, Value::Null, args)?;
 
@@ -1224,7 +1248,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<(), Error<'gc>> {
         let args = self.stack.get_args(arg_count as usize);
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
+        let receiver = self.pop_stack();
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, Some(&multiname))?;
+            return Ok(());
+        }
 
         receiver.call_property(&multiname, args, self)?;
 
@@ -1323,7 +1351,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
     ) -> Result<(), Error<'gc>> {
         // default path for static names
-        let object = self.pop_stack().null_check(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        if matches!(object, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(object, Some(&multiname))?;
+            self.push_stack(Value::Undefined);
+            return Ok(());
+        }
 
         let value = object.get_property(&multiname, self)?;
         self.push_stack(value);
@@ -1387,7 +1420,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     ) -> Result<(), Error<'gc>> {
         // main path for dynamic names
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let object = self.pop_stack().null_check(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        if matches!(object, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(object, Some(&multiname))?;
+            self.push_stack(Value::Undefined);
+            return Ok(());
+        }
 
         let value = object.get_property(&multiname, self)?;
         self.push_stack(value);
@@ -1406,7 +1444,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         let value = self.pop_stack();
 
-        let object = self.pop_stack().null_check(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        if matches!(object, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(object, Some(&multiname))?;
+            return Ok(());
+        }
 
         object.set_property(&multiname, value, self)?;
 
@@ -1474,7 +1516,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         let value = self.pop_stack();
 
         let multiname = multiname.fill_with_runtime_params(self)?;
-        let object = self.pop_stack().null_check(self, Some(&multiname))?;
+        let object = self.pop_stack();
+        if matches!(object, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(object, Some(&multiname))?;
+            return Ok(());
+        }
 
         object.set_property(&multiname, value, self)?;
 
@@ -1810,15 +1856,45 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
+    /// RuffleVita: a property read, write or call on null/undefined. Throws
+    /// Flash's TypeError when something up the stack can catch it, else lets
+    /// the caller skip the operation (see `rv_lenient`).
+    #[cold]
+    #[inline(never)]
+    fn rv_null_receiver(
+        &mut self,
+        value: Value<'gc>,
+        name: Option<&Multiname<'gc>>,
+    ) -> Result<(), Error<'gc>> {
+        let call_stack = self.avm2().call_stack();
+        if call_stack.borrow().any_catches() || !crate::rv_lenient::allow() {
+            return Err(make_null_or_undefined_error(self, value, name));
+        }
+        let gc = self.gc();
+        crate::rv_lenient::note(|| {
+            let mut at = crate::string::WString::new();
+            if let Some(method) = call_stack.borrow().top() {
+                crate::avm2::function::display_function(&mut at, method);
+            }
+            let field = name.map_or_else(|| "a slot".to_string(), |n| n.to_qualified_name(gc).to_string());
+            let what = if matches!(value, Value::Null) { "null" } else { "undefined" };
+            format!("{field} of {what} in {at}")
+        });
+        Ok(())
+    }
+
     #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
+        let receiver = self.stack.peek(0);
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, None)?;
+            let _ = self.pop_stack();
+            self.push_stack(Value::Undefined);
+            return Ok(());
+        }
         let stack_top = self.stack.stack_top();
 
-        let object = stack_top
-            .get()
-            .null_check(self, None)?
-            .as_object()
-            .expect("Cannot get_slot on primitive");
+        let object = receiver.as_object().expect("Cannot get_slot on primitive");
         let value = object.get_slot(index);
 
         // We use `stack_top` instead of `pop_stack` and `push_stack` here
@@ -1833,11 +1909,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// RuffleVita: GetLocal + GetSlot.
     #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_get_local_slot(&mut self, register_index: u32, index: u32) -> Result<(), Error<'gc>> {
-        let object = self
-            .local_register(register_index)
-            .null_check(self, None)?
-            .as_object()
-            .expect("Cannot get_slot on primitive");
+        let receiver = self.local_register(register_index);
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(receiver, None)?;
+            self.push_stack(Value::Undefined);
+            return Ok(());
+        }
+        let object = receiver.as_object().expect("Cannot get_slot on primitive");
 
         self.push_stack(object.get_slot(index));
 
@@ -1847,11 +1925,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_set_slot(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
-        let object = self
-            .pop_stack()
-            .null_check(self, None)?
-            .as_object()
-            .expect("Cannot set_slot on primitive");
+        let object_value = self.pop_stack();
+        if matches!(object_value, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(object_value, None)?;
+            return Ok(());
+        }
+        let object = object_value.as_object().expect("Cannot set_slot on primitive");
 
         object.set_slot(index, value, self)?;
 
@@ -1861,11 +1940,12 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     #[cfg_attr(feature = "rv_outline", inline(never))]
     fn op_set_slot_no_coerce(&mut self, index: u32) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
-        let object = self
-            .pop_stack()
-            .null_check(self, None)?
-            .as_object()
-            .expect("Cannot set_slot on primitive");
+        let object_value = self.pop_stack();
+        if matches!(object_value, Value::Null | Value::Undefined) {
+            self.rv_null_receiver(object_value, None)?;
+            return Ok(());
+        }
+        let object = object_value.as_object().expect("Cannot set_slot on primitive");
 
         object.set_slot_no_coerce(index, value, self.gc());
 

@@ -53,6 +53,17 @@ impl<'gc> CallStack<'gc> {
         }
     }
 
+    /// RuffleVita: whether any method on the stack has an exception
+    /// handler, i.e. a thrown error might be caught (see `rv_lenient`).
+    pub fn any_catches(&self) -> bool {
+        self.stack.iter().any(|m| m.body().is_some_and(|b| !b.exceptions.is_empty()))
+    }
+
+    /// RuffleVita: the method running now, for log messages.
+    pub fn top(&self) -> Option<Method<'gc>> {
+        self.stack.last().copied()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
     }
