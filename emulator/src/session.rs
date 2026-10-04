@@ -116,7 +116,7 @@ impl Session {
         let executor = NullExecutor::new();
         let missing = MissingFiles::default();
         let navigator = LocalNavigator::new(&executor, movie_url, missing.clone());
-        let storage = DiskStorageBackend::new(platform::saves_dir());
+        let storage = DiskStorageBackend::new(platform::saves_dir(), &key, &name, movie_url);
 
         // RuffleVita: apply the per-game physics speed before the movie runs.
         ruffle_core::set_phys_iter_cap(profile.physics.iteration_cap());

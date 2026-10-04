@@ -18,6 +18,7 @@ extern crate num_derive;
 mod avm1;
 mod avm2;
 pub mod rv_clock;
+pub mod rv_lenient;
 pub mod rv_stack;
 pub use rv_prof;
 

@@ -177,7 +177,7 @@ impl KeyPicker {
                 };
                 ui::card_with(g, r, 8.0, fill, 2.0, if selected { 3.0 } else { 2.0 });
                 let px = if key.label.chars().count() > 3 { 13.0 } else { 16.0 };
-                g.text_mid_center(FontId::Bold, px, r.center_x(), r.center_y(), theme::INK, &key.label);
+                g.text_mid_center(FontId::Bold, px, r.center_x(), r.center_y(), if selected { theme::ON_ACCENT } else { theme::INK }, &key.label);
             }
         }
         ui::footer(g, &[(Btn::Circle, "Cancel"), (Btn::Cross, "Choose")]);

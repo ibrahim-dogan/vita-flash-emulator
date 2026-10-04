@@ -95,6 +95,57 @@ impl LocalNavigator {
     }
 }
 
+/// Portal APIs (Kongregate, MindJolt) that many games load at startup and
+/// then call without checking that they arrived. A small stand-in built from
+/// `assets/stubs` (see the comment there) keeps them going.
+static PORTAL_API_STUB: &[u8] = include_bytes!("../../assets/stubs/portal_api.swf");
+
+/// The stand-in for a URL that loads a known online API, if there is one.
+fn api_stub(url: &Url) -> Option<&'static [u8]> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    let file = url.path().rsplit('/').next()?.to_ascii_lowercase();
+    let portal = host.ends_with("kongregate.com") || host.ends_with("mindjolt.com");
+    (portal && file.starts_with("api_as3") && file.ends_with(".swf")).then_some(PORTAL_API_STUB)
+}
+
+/// A response served from memory.
+struct StaticResponse {
+    url: String,
+    body: Option<&'static [u8]>,
+}
+
+impl SuccessResponse for StaticResponse {
+    fn url(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.url)
+    }
+
+    fn body(self: Box<Self>) -> OwnedFuture<Vec<u8>, Error> {
+        let body = self.body.unwrap_or_default().to_vec();
+        Box::pin(async move { Ok(body) })
+    }
+
+    fn text_encoding(&self) -> Option<&'static Encoding> {
+        None
+    }
+
+    fn status(&self) -> u16 {
+        0
+    }
+
+    fn redirected(&self) -> bool {
+        false
+    }
+
+    fn next_chunk(&mut self) -> OwnedFuture<Option<Vec<u8>>, Error> {
+        let chunk = self.body.take().map(<[u8]>::to_vec);
+        Box::pin(async move { Ok(chunk) })
+    }
+
+    fn expected_length(&self) -> Result<Option<u64>, Error> {
+        Ok(self.body.map(|b| b.len() as u64))
+    }
+}
+
 struct LocalResponse {
     url: String,
     path: PathBuf,
@@ -171,12 +222,17 @@ impl NavigatorBackend for LocalNavigator {
                 fs_url.set_query(None);
                 fs_url.set_fragment(None);
                 match self.local_path(&fs_url) {
+                    // A copy on the memory card wins over the stand-in.
                     Some(path) if path.is_file() => {
                         if url.scheme() != "file" {
                             tracing::info!("Serving {url} from {}", path.display());
                         }
                         Ok(Box::new(LocalResponse { url: url.to_string(), path, file: None })
                             as Box<dyn SuccessResponse>)
+                    }
+                    _ if api_stub(&url).is_some() => {
+                        tracing::info!("Serving {url} from the built-in stand-in");
+                        Ok(Box::new(StaticResponse { url: url.to_string(), body: api_stub(&url) }) as Box<dyn SuccessResponse>)
                     }
                     Some(path) => {
                         if let Some(name) = path.file_name() {
@@ -233,6 +289,19 @@ impl NavigatorBackend for LocalNavigator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_apis_are_stubbed() {
+        for u in [
+            "http://www.kongregate.com/flash/API_AS3_Local.swf",
+            "https://chat.kongregate.com/flash/API_AS3_d43c4b859e74432475c1627346078677.swf",
+            "http://static.mindjolt.com/api/as3/api_as3_local.swf",
+        ] {
+            assert!(api_stub(&Url::parse(u).unwrap()).is_some(), "{u}");
+        }
+        assert!(api_stub(&Url::parse("http://www.kongregate.com/games/x.swf").unwrap()).is_none());
+        assert!(api_stub(&Url::parse("file:///ux0:data/FlashGames/API_AS3_Local.swf").unwrap()).is_none());
+    }
 
     #[test]
     fn vita_style_paths_round_trip() {

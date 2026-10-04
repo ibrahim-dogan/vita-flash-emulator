@@ -533,7 +533,7 @@ impl ExploreScreen {
     fn draw_search(&self, g: &mut Gfx) {
         let fill = if self.searching { theme::SUN } else { theme::PAPER_DIM };
         g.rounded_outline(SEARCH, 10.0, 2.0, theme::INK, fill);
-        g.icon(Icon::Search, SEARCH.x + 12.0, SEARCH.center_y() - 10.0, 20.0, theme::INK);
+        g.icon(Icon::Search, SEARCH.x + 12.0, SEARCH.center_y() - 10.0, 20.0, theme::ink_on(fill));
         let x = SEARCH.x + 42.0;
         let max_w = SEARCH.w - 42.0 - 44.0;
         if self.query.is_empty() && !self.searching {
@@ -575,17 +575,18 @@ impl ExploreScreen {
         let badge_w = badge.map_or(0.0, |(t, _)| g.measure(FontId::Bold, 11.0, t) + 16.0);
         let max_w = r.right() - tx - 12.0 - if badge_w > 0.0 { badge_w + 8.0 } else { 0.0 };
         let title = g.ellipsize(FontId::Bold, 16.5, &e.title, max_w);
-        g.text_mid(FontId::Bold, 16.5, tx, r.y + r.h * 0.36, theme::INK, &title);
+        let ink = if selected { theme::ON_ACCENT } else { theme::INK };
+        g.text_mid(FontId::Bold, 16.5, tx, r.y + r.h * 0.36, ink, &title);
         let mut sub = vec![ui::human_size(self.probes.get(&e.slug).and_then(|p| p.total).unwrap_or(e.size)), e.year().to_owned()];
         if let Some(Some(Ok(info))) = self.probes.get(&e.slug).map(|p| &p.info) {
             sub.insert(0, if info.as3 { "AS3".into() } else { "AS1/2".into() });
         }
-        let sub_color = if selected { theme::INK.alpha(0.7) } else { theme::MUTED };
+        let sub_color = if selected { theme::ON_ACCENT.alpha(0.7) } else { theme::MUTED };
         g.text_mid(FontId::Regular, 13.0, tx, r.y + r.h * 0.7, sub_color, &sub.join("  \u{00b7}  "));
         if let Some((text, fill)) = badge {
             let b = Rect::new(r.right() - 10.0 - badge_w, r.center_y() - 11.0, badge_w, 22.0);
             g.rounded_outline(b, 6.0, 2.0, theme::INK, fill);
-            g.text_mid_center(FontId::Bold, 11.0, b.center_x(), b.center_y(), theme::INK, text);
+            g.text_mid_center(FontId::Bold, 11.0, b.center_x(), b.center_y(), theme::ON_ACCENT, text);
         }
     }
 
@@ -680,7 +681,7 @@ impl ExploreScreen {
 fn status_line(g: &mut Gfx, area: Rect, icon: Icon, fill: Color, text: &str) {
     let tile = Rect::new(area.x, area.y + 2.0, 36.0, 36.0);
     ui::card_with(g, tile, 9.0, fill, 2.0, 3.0);
-    g.icon(icon, tile.x + 7.0, tile.y + 7.0, 22.0, theme::INK);
+    g.icon(icon, tile.x + 7.0, tile.y + 7.0, 22.0, theme::ink_on(fill));
     let text = g.ellipsize(FontId::Bold, 15.5, text, area.w - 52.0);
     g.text_mid(FontId::Bold, 15.5, tile.right() + 14.0, tile.center_y(), theme::PAPER, &text);
 }

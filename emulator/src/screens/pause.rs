@@ -128,9 +128,10 @@ impl PauseMenu {
                 let fill = if confirming { theme::TOMATO } else { theme::SUN };
                 g.rounded_outline(r, 10.0, theme::BORDER, theme::INK, fill);
             }
-            g.icon(*icon, r.x + 16.0, r.center_y() - 11.0, 22.0, theme::INK);
+            let ink = if selected { theme::ON_ACCENT } else { theme::INK };
+            g.icon(*icon, r.x + 16.0, r.center_y() - 11.0, 22.0, ink);
             let text = if confirming { "Press Cross again to confirm" } else { label };
-            g.text_mid(FontId::Bold, 16.5, r.x + 52.0, r.center_y(), theme::INK, text);
+            g.text_mid(FontId::Bold, 16.5, r.x + 52.0, r.center_y(), ink, text);
         }
         ui::footer(g, &[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
     }

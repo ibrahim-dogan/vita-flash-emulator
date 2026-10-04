@@ -44,8 +44,29 @@ impl Game {
             .info
             .as_ref()
             .and_then(|i| i.title.as_deref())
+            .filter(|t| !is_generic_title(t))
             .unwrap_or(&self.name)
     }
+}
+
+/// Metadata titles that tools fill in by default ("Adobe Flex 4
+/// Application", "Untitled-1") or that name the publisher or its site
+/// ("Easy Street Games", "spilgames.com") say nothing about the game; the
+/// file name is better.
+fn is_generic_title(title: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    const EXACT: [&str; 12] = [
+        "flash", "flash movie", "flash game", "main", "preloader", "document", "movie", "game", "app",
+        "application", "swf", "title",
+    ];
+    EXACT.contains(&t.as_str())
+        || t.starts_with("adobe flex")
+        || t.starts_with("adobe flash")
+        || t.starts_with("flex ")
+        || t.starts_with("macromedia")
+        || t.strip_prefix("untitled").is_some_and(|r| r.chars().all(|c| !c.is_alphabetic()))
+        || [".com", ".net", ".org", "www.", "http", "|"].iter().any(|p| t.contains(p))
+        || [" games", " studio", " studios", " entertainment", " interactive"].iter().any(|p| t.ends_with(p))
 }
 
 pub struct Library {
@@ -191,6 +212,21 @@ impl Library {
         if self.dirty {
             config::write_ron(&db_path(), &self.db);
             self.dirty = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_generic_title;
+
+    #[test]
+    fn generic_titles() {
+        for t in ["Adobe Flex 4 Application", "Adobe Flex 3 Application", "Untitled-1", "untitled", "Main", " Preloader ", "zlonggames.com|spilgames.com", "Easy Street Games"] {
+            assert!(is_generic_title(t), "{t}");
+        }
+        for t in ["Raft Wars", "Untitled Goose", "Mainframe Defenders", "Flashback"] {
+            assert!(!is_generic_title(t), "{t}");
         }
     }
 }

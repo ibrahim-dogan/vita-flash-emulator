@@ -90,14 +90,17 @@ Version 1.0.0 was released as FlashVita. RuffleVita installs as a new app next t
 | Front touch screen | Mouse (tap to click, drag to drag) |
 | **L + R + START** | RuffleVita menu (always works, whatever the bindings) |
 
-Open **Game settings** from the library (△) or the pause menu. There you can bind any button to any key, a mouse click or the menu. Sticks can be arrows, WASD, mouse cursor or off. You can also change how the game fits the screen, the render quality, the FPS counter, the cursor speed and the rear touchpad (as a trackpad). **"Use these settings for new games"** makes the current setup your default.
+Open **Game settings** from the library (△) or the pause menu. There you can bind any button to any key, a mouse click or the menu. Sticks can be arrows, WASD, mouse cursor or off. You can also change how the game fits the screen, the render quality, the physics speed, the FPS counter, the cursor speed and the rear touchpad (as a trackpad). V-Sync and **Dark mode** (for RuffleVita's own menus) apply to all games. **"Use these settings for new games"** makes the current setup your default.
 
 ## Features
 
 - **Explore.** Browse, search and download about 6,000 games from the Silvergames Flash archive, with each game's details read before you download it.
 - **Library with covers.** Covers are pulled from artwork inside each SWF, replaced by a screenshot once you've played for a bit, or set manually from the pause menu. The library also shows SWF details (ActionScript version, stage size, frame rate, file size) and play history.
 - **Fast startup.** Games are read and unpacked on a background thread while an animated loading screen shows progress. SWF analysis is cached between runs.
-- **Pause menu.** Resume, change settings with a live preview, set a cover, restart, or quit to the library. Game saves are written to the memory card when you pause.
+- **Pause menu.** Resume, change settings with a live preview, set a cover, restart, or quit to the library.
+- **Saves.** Each game keeps its saves in its own folder, `ux0:data/rufflevita/saves/<Game> [id]/`. They are written when you pause or quit, and every 30 seconds while you play.
+- **Works offline.** Many games call web services that are long gone (Kongregate, MindJolt, ad and score servers). RuffleVita answers the common portal APIs itself and keeps a game running when a missing service would otherwise stop it.
+- **Dark mode.** A dark theme for the library, Explore and settings.
 - **Tuned for the Vita.** Frame pacing that follows the game's own frame rate (no busy looping), CPU at 444 MHz and GPU at 222 MHz, and a GLES2 renderer optimised for vitaGL.
 
 ## Compatibility and troubleshooting
@@ -108,7 +111,7 @@ RuffleVita plays whatever [Ruffle](https://ruffle.rs/#compatibility) can play. M
 - **Filters:** blur, glow and drop shadow aren't applied.
 - **Hardware features:** Stage3D and embedded video.
 
-**A game runs slowly.** The Vita's CPU is many times slower than a PC's, and Ruffle runs ActionScript without a JIT, so heavy ActionScript 3 games (physics games such as Happy Wheels) can drop to single-digit frame rates. Turn on the FPS counter in the game's settings to see where the time goes: `tick` is the game's own code, `render` and `present` are drawing.
+**A game runs slowly.** The Vita's CPU is many times slower than a PC's, and Ruffle runs ActionScript without a JIT, so heavy ActionScript 3 games can drop to low frame rates. The Box2D physics engine and the Alternativa3D engine are compiled ahead of time, which makes Happy Wheels about twice as fast and speeds up 3D games such as 3D Taxi Racing. For physics games, **Physics speed: Fast** in the game's settings trades a little accuracy for more speed. Turn on the FPS counter in the game's settings to see where the time goes: `tick` is the game's own code, `render` and `present` are drawing.
 
 **A game stays on its loading screen.** It is probably trying to download a file that isn't on your Vita. A message names the missing file; put it next to the game.
 

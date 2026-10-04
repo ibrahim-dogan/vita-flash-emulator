@@ -719,7 +719,7 @@ impl App {
             _ => self.settings.load_profile(&key),
         };
         self.modal = Some(Modal::Settings {
-            screen: SettingsScreen::new(name, profile.clone(), self.settings.vsync),
+            screen: SettingsScreen::new(name, profile.clone(), self.settings.vsync, ui::gfx::is_dark()),
             key,
             original: profile,
             from_pause,
@@ -835,6 +835,10 @@ impl App {
                             self.lib_screen.invalidate_profile(&key);
                         }
                         self.set_vsync(screen.vsync);
+                        if self.settings.dark_mode != screen.dark_mode {
+                            self.settings.dark_mode = screen.dark_mode;
+                            self.settings.save();
+                        }
                         self.modal = from_pause.then(|| Modal::Pause(PauseMenu::new()));
                         self.input.clear_events();
                     }

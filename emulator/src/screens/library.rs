@@ -280,7 +280,8 @@ fn draw_row(g: &mut Gfx, game: &Game, r: Rect, selected: bool, thumbs: &ThumbCac
     let tx = thumb.right() + 12.0;
     let max_w = r.right() - tx - 12.0;
     let title = g.ellipsize(FontId::Bold, 16.5, game.title(), max_w);
-    g.text_mid(FontId::Bold, 16.5, tx, r.y + r.h * 0.36, theme::INK, &title);
+    let ink = if selected { theme::ON_ACCENT } else { theme::INK };
+        g.text_mid(FontId::Bold, 16.5, tx, r.y + r.h * 0.36, ink, &title);
 
     let mut sub = Vec::new();
     if let Some(info) = &game.db.info {
@@ -293,7 +294,7 @@ fn draw_row(g: &mut Gfx, game: &Game, r: Rect, selected: bool, thumbs: &ThumbCac
         sub.push(folder.clone());
     }
     let sub = g.ellipsize(FontId::Regular, 13.0, &sub.join("  \u{00b7}  "), max_w);
-    let sub_color = if selected { theme::INK.alpha(0.7) } else { theme::MUTED };
+    let sub_color = if selected { theme::ON_ACCENT.alpha(0.7) } else { theme::MUTED };
     g.text_mid(FontId::Regular, 13.0, tx, r.y + r.h * 0.7, sub_color, &sub);
 }
 
@@ -353,7 +354,7 @@ fn empty_state(g: &mut Gfx) {
     let w = g.measure(FontId::Bold, 17.0, &path) + 28.0;
     let pill = Rect::new((card.center_x() - w * 0.5).round(), card.y + 194.0, w.round(), 36.0);
     g.rounded_outline(pill, 10.0, 2.0, theme::INK, theme::SUN);
-    g.text_mid_center(FontId::Bold, 17.0, pill.center_x(), pill.center_y(), theme::INK, &path);
+    g.text_mid_center(FontId::Bold, 17.0, pill.center_x(), pill.center_y(), theme::ON_ACCENT, &path);
     // "or find some in Explore (R), then press (X) to refresh." with real glyphs.
     let (a, b, c) = ("Find some in", "Explore, or press", "to refresh.");
     let size = 22.0;
