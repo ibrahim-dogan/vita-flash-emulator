@@ -100,6 +100,8 @@ Open **Game settings** from the library (△) or the pause menu. There you can b
 - **Pause menu.** Resume, change settings with a live preview, set a cover, restart, or quit to the library.
 - **Saves.** Each game keeps its saves in its own folder, `ux0:data/rufflevita/saves/<Game> [id]/`. They are written when you pause or quit, and every 30 seconds while you play.
 - **Works offline.** Many games call web services that are long gone (Kongregate, MindJolt, ad and score servers). RuffleVita answers the common portal APIs itself and keeps a game running when a missing service would otherwise stop it.
+- **Home screen bubbles.** Game settings → Display → *Make a home screen bubble* saves a VPK to `ux0:data/rufflevita/bubbles/`. Install it with VitaShell and the game gets its own bubble, with its cover as the icon and LiveArea background, that opens it straight away.
+- **Direct launch.** HexFlow, RetroFlow and Custom Bubbles can start a game with `psgm:play?titleid=RUFFLEVIT&param=ux0:data/FlashGames/<game>.swf`.
 - **Dark mode.** A dark theme for the library, Explore and settings.
 - **Tuned for the Vita.** Frame pacing that follows the game's own frame rate (no busy looping), CPU at 444 MHz and GPU at 222 MHz, and a GLES2 renderer optimised for vitaGL.
 
