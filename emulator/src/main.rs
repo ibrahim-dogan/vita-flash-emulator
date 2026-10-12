@@ -210,6 +210,18 @@ fn guarded<R>(f: impl FnOnce() -> R) -> Option<R> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }
 
+/// Freed when an allocation fails, so the out-of-memory hook has room to log
+/// and unwind. Re-armed whenever a game starts.
+static OOM_RESERVE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+fn arm_oom_reserve() {
+    if let Ok(mut reserve) = OOM_RESERVE.lock() {
+        if reserve.is_none() {
+            *reserve = Some(vec![1u8; 1 << 20]);
+        }
+    }
+}
+
 fn run() -> anyhow::Result<()> {
     let migrated = platform::migrate_old_data();
     platform::ensure_dirs();
@@ -219,7 +231,16 @@ fn run() -> anyhow::Result<()> {
         tracing::info!("autorun.txt set {}", autorun.join(", "));
     }
     // Out of memory aborts the app; say so in the log first.
+    arm_oom_reserve();
     std::alloc::set_alloc_error_hook(|layout| {
+        // Logging and unwinding allocate too. Without the reserve this hook
+        // re-entered itself on every failed allocation until the stack ran
+        // out, and the app died with nothing in the log.
+        let reserve = OOM_RESERVE.try_lock().ok().and_then(|mut r| r.take());
+        if reserve.is_none() {
+            std::process::abort();
+        }
+        drop(reserve);
         let memory = platform::memory_summary().unwrap_or_default();
         tracing::error!("Out of memory allocating {} bytes \u{b7} {memory}", layout.size());
         // Unwind to the frame guard, which ends the game and frees its memory.
@@ -644,6 +665,7 @@ impl App {
         let (key, name, path) = (game.key.clone(), game.title().to_owned(), game.path.clone());
         // Free the previous game's memory before loading the next one.
         self.session = None;
+        arm_oom_reserve();
         self.modal = None;
         self.settings.last_game = Some(key.clone());
         self.settings.save();

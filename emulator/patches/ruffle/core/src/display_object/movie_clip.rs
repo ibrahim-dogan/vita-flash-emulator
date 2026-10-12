@@ -3750,7 +3750,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
         let sound = reader.read_define_sound()?;
-        if let Ok(handle) = context.audio.register_sound(&sound) {
+        let movie = SwfSlice::from(self.movie());
+        if let Ok(handle) = context.audio.register_sound_from_movie(&sound, &movie) {
             self.library_mut(context)
                 .register_character(sound.id, Character::Sound(handle));
         } else {

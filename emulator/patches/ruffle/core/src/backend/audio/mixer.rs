@@ -147,7 +147,7 @@ struct Sound {
     /// The audio data of this sound.
     ///
     /// This will be compressed in the format indicated by `format.compression`.
-    data: Arc<[u8]>,
+    data: ArcAsRef,
 
     /// Number of samples in this audio.
     /// This does not include `skip_sample_frames`.
@@ -519,7 +519,39 @@ impl AudioMixer {
 
         let sound = Sound {
             format: swf_sound.format.clone(),
-            data: Arc::from(data),
+            data: ArcAsRef::Owned(Arc::from(data)),
+            num_sample_frames: swf_sound.num_samples,
+            skip_sample_frames,
+        };
+        Ok(self.sounds.insert(sound))
+    }
+
+    /// RuffleVita: registers a sound whose bytes stay in the movie's data
+    /// instead of being copied. Sound-heavy games (Punk-o-Matic 2 has 31 MB
+    /// of sounds) otherwise hold every sound twice.
+    pub fn register_sound_from_movie(
+        &mut self,
+        swf_sound: &swf::Sound,
+        movie: &SwfSlice,
+    ) -> Result<SoundHandle, RegisterError> {
+        let (skip_sample_frames, data) = if swf_sound.format.compression == AudioCompression::Mp3 {
+            if swf_sound.data.len() < 2 {
+                return Err(RegisterError::ShortMp3);
+            }
+            let skip_sample_frames = u16::from_le_bytes([swf_sound.data[0], swf_sound.data[1]]);
+            (skip_sample_frames, &swf_sound.data[2..])
+        } else {
+            (0, swf_sound.data)
+        };
+        let slice = movie.to_subslice(data);
+        let data = if slice.len() == data.len() {
+            ArcAsRef::Movie(slice)
+        } else {
+            ArcAsRef::Owned(Arc::from(data))
+        };
+        let sound = Sound {
+            format: swf_sound.format.clone(),
+            data,
             num_sample_frames: swf_sound.num_samples,
             skip_sample_frames,
         };
@@ -539,7 +571,7 @@ impl AudioMixer {
                 is_stereo: true,
                 is_16_bit: true,
             },
-            data,
+            data: ArcAsRef::Owned(data),
             num_sample_frames: metadata.num_sample_frames,
             skip_sample_frames: 0,
         };
@@ -579,7 +611,7 @@ impl AudioMixer {
         settings: &swf::SoundInfo,
     ) -> Result<SoundInstanceHandle, DecodeError> {
         let sound = &self.sounds[sound_handle];
-        let data = Cursor::new(ArcAsRef(Arc::clone(&sound.data)));
+        let data = Cursor::new(sound.data.clone());
         // Create a stream that decodes and resamples the sound.
         let stream = if sound.skip_sample_frames == 0
             && settings.in_sample.is_none()
@@ -679,7 +711,7 @@ impl AudioMixer {
     }
 
     pub fn get_sound_size(&self, sound: SoundHandle) -> Option<u32> {
-        self.sounds.get(sound).map(|s| s.data.len() as u32)
+        self.sounds.get(sound).map(|s| s.data.as_ref().len() as u32)
     }
 
     pub fn get_sound_format(&self, sound: SoundHandle) -> Option<&swf::SoundFormat> {
@@ -762,18 +794,26 @@ impl AudioMixerProxy {
 
 /// A dummy wrapper struct to implement `AsRef<[u8]>` for `Arc<Vec<u8>>`.
 /// Not having this trait causes problems when trying to use `Cursor<Vec<u8>>`.
-struct ArcAsRef(Arc<[u8]>);
+/// Sound bytes: a copy, or (RuffleVita) a range of the movie's own data.
+#[derive(Clone)]
+enum ArcAsRef {
+    Owned(Arc<[u8]>),
+    Movie(SwfSlice),
+}
 
 impl AsRef<[u8]> for ArcAsRef {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        match self {
+            ArcAsRef::Owned(data) => data,
+            ArcAsRef::Movie(slice) => slice.data(),
+        }
     }
 }
 
 impl Default for ArcAsRef {
     fn default() -> Self {
-        ArcAsRef(Arc::new([]))
+        ArcAsRef::Owned(Arc::new([]))
     }
 }
 
@@ -1071,6 +1111,15 @@ macro_rules! impl_audio_mixer_backend {
         #[inline]
         fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
             self.$mixer.register_sound(swf_sound)
+        }
+
+        #[inline]
+        fn register_sound_from_movie(
+            &mut self,
+            swf_sound: &swf::Sound,
+            movie: &$crate::tag_utils::SwfSlice,
+        ) -> Result<SoundHandle, RegisterError> {
+            self.$mixer.register_sound_from_movie(swf_sound, movie)
         }
 
         #[inline]

@@ -292,7 +292,11 @@ pub struct Gfx {
     /// End of the fixed (shapes) region; glyphs/icons above it can be evicted.
     static_shelves: usize,
     static_next_y: usize,
-    fonts: [fontdue::Font; 4],
+    fonts: [fontdue::Font; 3],
+    /// Inter, for characters the others lack. Parsed on first use: fontdue
+    /// keeps every glyph's outline in memory (7 MB for Inter), and most
+    /// sessions never need it.
+    fallback: std::cell::OnceCell<fontdue::Font>,
     glyphs: HashMap<(u8, u16, u16), Option<Glyph>>,
     patterns: [glow::Texture; 2],
     icons: HashMap<(Icon, u16), UvRect>,
@@ -367,7 +371,7 @@ impl Gfx {
             fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
                 .map_err(|e| anyhow::anyhow!("font: {e}"))
         };
-        let fonts = [font(FONT_REGULAR)?, font(FONT_BOLD)?, font(FONT_DISPLAY)?, font(FONT_FALLBACK)?];
+        let fonts = [font(FONT_REGULAR)?, font(FONT_BOLD)?, font(FONT_DISPLAY)?];
 
         unsafe {
             let vs = ruffle_render_glow::compile_shader(&gl, glow::VERTEX_SHADER, VERT_SRC)?;
@@ -504,6 +508,7 @@ impl Gfx {
                 static_shelves,
                 static_next_y,
                 fonts,
+                fallback: std::cell::OnceCell::new(),
                 glyphs: HashMap::new(),
                 patterns,
                 icons: HashMap::new(),
@@ -797,8 +802,7 @@ impl Gfx {
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
-        let f = &self.fonts[font];
-        let (m, bitmap) = f.rasterize_indexed(index, px);
+        let (m, bitmap) = self.font(font).rasterize_indexed(index, px);
         let glyph = if m.width == 0 || m.height == 0 {
             Some(Glyph {
                 uv: self.white,
@@ -833,17 +837,26 @@ impl Gfx {
             other => &[other as usize, FALLBACK_FONT],
         };
         for &f in chain {
-            match self.fonts[f].lookup_glyph_index(c) {
+            match self.font(f).lookup_glyph_index(c) {
                 0 => continue,
                 i => return (f, i),
             }
         }
-        (chain[0], self.fonts[chain[0]].lookup_glyph_index('?'))
+        (chain[0], self.font(chain[0]).lookup_glyph_index('?'))
+    }
+
+    fn font(&self, index: usize) -> &fontdue::Font {
+        match self.fonts.get(index) {
+            Some(f) => f,
+            None => self.fallback.get_or_init(|| {
+                fontdue::Font::from_bytes(FONT_FALLBACK, fontdue::FontSettings::default()).expect("built-in font")
+            }),
+        }
     }
 
     fn kern(&self, prev: Option<(usize, u16)>, cur: (usize, u16), px: f32) -> f32 {
         match prev {
-            Some((pf, pi)) if pf == cur.0 => self.fonts[pf].horizontal_kern_indexed(pi, cur.1, px).unwrap_or(0.0),
+            Some((pf, pi)) if pf == cur.0 => self.font(pf).horizontal_kern_indexed(pi, cur.1, px).unwrap_or(0.0),
             _ => 0.0,
         }
     }
