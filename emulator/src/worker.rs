@@ -172,18 +172,30 @@ fn run(shared: Arc<Shared>, tx: Sender<Done>) {
 }
 
 fn load_movie(path: &std::path::Path, url: String, send: &dyn Fn(Done)) -> Result<SwfMovie, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| format!("Couldn't open file: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("Couldn't open file: {e}"))?;
     let total = file.metadata().map(|m| m.len()).unwrap_or(0).max(1);
-    let mut data = Vec::with_capacity(total as usize);
-    let mut chunk = vec![0u8; 1 << 20];
-    loop {
-        let n = file.read(&mut chunk).map_err(|e| format!("Couldn't read file: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&chunk[..n]);
-        send(Done::MovieProgress((data.len() as f32 / total as f32).min(1.0)));
+
+    /// Reports how far through the file decompression has got.
+    struct Progress<'a, R> {
+        inner: R,
+        read: u64,
+        total: u64,
+        reported: u64,
+        send: &'a dyn Fn(Done),
     }
-    drop(chunk);
-    SwfMovie::from_data(&data, url, None).map_err(|e| format!("Not a playable SWF: {e}"))
+    impl<R: Read> Read for Progress<'_, R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += n as u64;
+            if self.read - self.reported >= 1 << 20 || n == 0 {
+                self.reported = self.read;
+                (self.send)(Done::MovieProgress((self.read as f32 / self.total as f32).min(1.0)));
+            }
+            Ok(n)
+        }
+    }
+
+    // Decompress while reading, so the compressed file is never held whole.
+    let reader = Progress { inner: std::io::BufReader::with_capacity(1 << 20, file), read: 0, total, reported: 0, send };
+    SwfMovie::from_reader(reader, total as usize, url, None).map_err(|e| format!("Not a playable SWF: {e}"))
 }

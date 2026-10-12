@@ -92,6 +92,17 @@ pub trait AudioBackend: Any {
     /// Registers an sound embedded in an SWF.
     fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError>;
 
+    /// RuffleVita: like `register_sound`, for a sound whose bytes lie inside
+    /// `movie`, so a backend can keep a reference instead of a copy.
+    fn register_sound_from_movie(
+        &mut self,
+        swf_sound: &swf::Sound,
+        movie: &crate::tag_utils::SwfSlice,
+    ) -> Result<SoundHandle, RegisterError> {
+        let _ = movie;
+        self.register_sound(swf_sound)
+    }
+
     /// Registers MP3 audio from an external source.
     fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError>;
 

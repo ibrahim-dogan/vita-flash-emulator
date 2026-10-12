@@ -90,8 +90,14 @@ unsafe impl<'gc> Collect<'gc> for StackData<'gc> {
     // obtained from get_stack_frame. StackFrame doesn't implement Collect, so
     // StackFrames from before a collection can't be accessed after the collection.
     fn trace<C: Trace<'gc>>(&self, _cc: &mut C) {
-        // There should be no values on the value stack when collection is triggered
-        assert!(self.stack_pointer.get() == 0);
+        // There should be no values on the value stack when collection is triggered.
+        // RuffleVita: a panic in the middle of a script (out of memory, say)
+        // leaves values behind. The player is being thrown away then, and
+        // asserting here stopped its memory from being freed, so reset instead.
+        if self.stack_pointer.get() != 0 {
+            tracing::error!("AVM2 stack not empty at collection; resetting (after a crash?)");
+            self.stack_pointer.set(0);
+        }
     }
 }
 

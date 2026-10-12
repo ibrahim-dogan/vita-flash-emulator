@@ -197,8 +197,19 @@ impl SwfMovie {
         url: String,
         loader_url: Option<String>,
     ) -> Result<Self, Error> {
-        let compressed_len = swf_data.len();
-        let swf_buf = swf::read::decompress_swf(swf_data)?;
+        Self::from_reader(swf_data, swf_data.len(), url, loader_url)
+    }
+
+    /// RuffleVita: like `from_data`, decompressing straight from `reader`, so
+    /// the compressed file never has to be in memory next to the movie (a
+    /// 33 MB game otherwise peaks at 33 MB more than it needs).
+    pub fn from_reader(
+        reader: impl std::io::Read,
+        compressed_len: usize,
+        url: String,
+        loader_url: Option<String>,
+    ) -> Result<Self, Error> {
+        let swf_buf = swf::read::decompress_swf(reader)?;
         let encoding = swf::SwfStr::encoding_for_version(swf_buf.header.version());
         let sandbox_type = SandboxType::infer(url.as_str(), &swf_buf.header);
         let mut movie = Self {
