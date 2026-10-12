@@ -10,6 +10,7 @@
 #[cfg(not(target_os = "vita"))]
 mod assets;
 mod backends;
+mod bubble;
 mod catalog;
 mod config;
 mod fetcher;
@@ -615,6 +616,29 @@ impl App {
 
     // ------------------------------------------------------------- flow
 
+    /// Writes a home screen bubble VPK for a game, from its cover.
+    fn make_bubble(&mut self, key: &str) {
+        let Some(game) = self.lib.index_of(key).map(|i| &self.lib.games[i]) else { return };
+        let (title, path) = (game.title().to_owned(), game.path.clone());
+        let Some((cover, _)) = thumbs::load(key) else {
+            self.toast = Some(Toast::lasting("Set a cover first: pause the game and pick Set cover", 4000));
+            return;
+        };
+        let written = bubble::render(&mut self.gfx, &self.gl, &cover, &title)
+            .ok_or_else(|| std::io::Error::other("couldn't draw the images"))
+            .and_then(|pictures| bubble::write_vpk(key, &title, &path, &pictures));
+        self.toast = Some(match written {
+            Ok(vpk) => {
+                tracing::info!("bubble written to {}", vpk.display());
+                Toast::lasting(format!("Bubble saved to {}. Install it with VitaShell.", vpk.display()), 8000)
+            }
+            Err(e) => {
+                tracing::warn!("bubble for {key}: {e}");
+                Toast::lasting(format!("Couldn't make the bubble: {e}"), 5000)
+            }
+        });
+    }
+
     fn start_game(&mut self, index: usize) {
         let Some(game) = self.lib.games.get(index) else { return };
         let (key, name, path) = (game.key.clone(), game.title().to_owned(), game.path.clone());
@@ -851,6 +875,10 @@ impl App {
                         }
                         self.modal = from_pause.then(|| Modal::Pause(PauseMenu::new()));
                         self.input.clear_events();
+                    }
+                    SettingsResult::MakeBubble => {
+                        self.make_bubble(&key);
+                        self.modal = Some(Modal::Settings { screen, key, original, from_pause });
                     }
                     SettingsResult::MakeDefault => {
                         self.settings.default_profile = screen.profile.clone();

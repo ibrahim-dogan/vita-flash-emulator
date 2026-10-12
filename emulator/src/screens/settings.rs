@@ -13,6 +13,8 @@ pub enum SettingsResult {
     Changed,
     Close,
     MakeDefault,
+    /// Make a home screen bubble for this game.
+    MakeBubble,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -36,6 +38,7 @@ enum Row {
     VSync,
     DarkMode,
     MakeDefault,
+    MakeBubble,
 }
 
 const PANEL: Rect = Rect::new(96.0, 28.0, 768.0, 462.0);
@@ -91,6 +94,7 @@ impl SettingsScreen {
                 Row::VSync,
                 Row::DarkMode,
                 Row::MakeDefault,
+                Row::MakeBubble,
             ],
         }
     }
@@ -142,6 +146,7 @@ impl SettingsScreen {
                 SettingsResult::Changed
             }
             Row::MakeDefault => SettingsResult::MakeDefault,
+            Row::MakeBubble => SettingsResult::MakeBubble,
             other => {
                 if self.cycle(other, 1) {
                     SettingsResult::Changed
@@ -272,7 +277,7 @@ impl SettingsScreen {
             Row::VSync => (on_off(self.vsync), true),
             Row::DarkMode => (on_off(self.dark_mode), true),
             Row::CursorSpeed => (format!("{}", p.cursor_speed), true),
-            Row::ResetControls | Row::MakeDefault => (String::new(), false),
+            Row::ResetControls | Row::MakeDefault | Row::MakeBubble => (String::new(), false),
         }
     }
 
@@ -291,6 +296,7 @@ impl SettingsScreen {
             Row::VSync => ("V-Sync (all games)", Some("Off can raise FPS but may tear")),
             Row::DarkMode => ("Dark mode (launcher)", Some("Dark menus and library; games are unaffected")),
             Row::MakeDefault => ("Use these settings for new games", None),
+            Row::MakeBubble => ("Make a home screen bubble", Some("Saves a VPK to install with VitaShell")),
         }
     }
 

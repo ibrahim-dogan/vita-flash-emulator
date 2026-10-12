@@ -179,7 +179,29 @@ pub fn launch_param() -> Option<String> {
     };
     #[cfg(not(target_os = "vita"))]
     let param = std::env::args().nth(1)?;
-    Some(param).filter(|p| !p.is_empty())
+    Some(percent_decode(&param)).filter(|p| !p.is_empty())
+}
+
+/// Undoes the `%XX` escapes home screen bubbles use (see `bubble.rs`);
+/// anything else, including a lone `%`, is kept as it is.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+        match hex.filter(|_| bytes[i] == b'%').and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Asks macOS to keep the main thread on the performance cores even though
@@ -348,4 +370,14 @@ pub fn gpu_free() -> usize {
         fn vglMemFree(kind: i32) -> usize;
     }
     unsafe { vglMemFree(0) + vglMemFree(1) + vglMemFree(2) }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn percent_decoding() {
+        assert_eq!(super::percent_decode("ux0:data/FlashGames/a%20koopa%27s.swf"), "ux0:data/FlashGames/a koopa's.swf");
+        assert_eq!(super::percent_decode("100%_fun.swf"), "100%_fun.swf");
+        assert_eq!(super::percent_decode("plain.swf"), "plain.swf");
+    }
 }
