@@ -1581,6 +1581,35 @@ fn world_matrix(matrix: &Matrix) -> [[f32; 4]; 4] {
     ]
 }
 
+/// The unit-square matrix of a one-pixel-wide quad covering the segment
+/// `from`-`to` (in `matrix`'s unit space), half a pixel past each end so
+/// rectangle corners are filled. `None` for a zero-length segment.
+fn line_quad(matrix: &Matrix, from: (f32, f32), to: (f32, f32)) -> Option<Matrix> {
+    let at = |(x, y): (f32, f32)| {
+        (
+            matrix.a * x + matrix.c * y + matrix.tx.to_pixels() as f32,
+            matrix.b * x + matrix.d * y + matrix.ty.to_pixels() as f32,
+        )
+    };
+    let (p, q) = (at(from), at(to));
+    let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-3 {
+        return None;
+    }
+    // Unit direction and normal, half a pixel each.
+    let (ux, uy) = (dx / len * 0.5, dy / len * 0.5);
+    let (nx, ny) = (-uy, ux);
+    Some(Matrix {
+        a: dx + 2.0 * ux,
+        b: dy + 2.0 * uy,
+        c: 2.0 * nx,
+        d: 2.0 * ny,
+        tx: Twips::from_pixels((p.0 - ux - nx) as f64),
+        ty: Twips::from_pixels((p.1 - uy - ny) as f64),
+    })
+}
+
 fn same_blend_mode(first: Option<&RenderBlendMode>, second: &RenderBlendMode) -> bool {
     match (first, second) {
         (Some(RenderBlendMode::Builtin(old)), RenderBlendMode::Builtin(new)) => old == new,
@@ -2124,16 +2153,26 @@ impl CommandHandler for GlowRenderBackend {
         self.draw_quad::<{ glow::TRIANGLE_FAN }, -1>(color, matrix)
     }
 
+    // Lines are drawn as one-pixel quads, not GL lines: vitaGL (built with
+    // PRIMITIVES_SPEEDHACK) leaves the GPU in line mode after a line draw,
+    // so everything after a text field's border or caret drew as wireframe.
     fn draw_line(&mut self, color: Color, mut matrix: Matrix) {
         matrix.tx += Twips::HALF_PX;
         matrix.ty += Twips::HALF_PX;
-        self.draw_quad::<{ glow::LINE_STRIP }, 2>(color, matrix)
+        if let Some(quad) = line_quad(&matrix, (0.0, 0.0), (1.0, 0.0)) {
+            self.draw_quad::<{ glow::TRIANGLE_FAN }, -1>(color, quad);
+        }
     }
 
     fn draw_line_rect(&mut self, color: Color, mut matrix: Matrix) {
         matrix.tx += Twips::HALF_PX;
         matrix.ty += Twips::HALF_PX;
-        self.draw_quad::<{ glow::LINE_LOOP }, -1>(color, matrix)
+        let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for i in 0..4 {
+            if let Some(quad) = line_quad(&matrix, corners[i], corners[(i + 1) % 4]) {
+                self.draw_quad::<{ glow::TRIANGLE_FAN }, -1>(color, quad);
+            }
+        }
     }
 
     fn push_mask(&mut self) {
