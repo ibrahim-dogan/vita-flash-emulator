@@ -1,32 +1,31 @@
 **RuffleVita** — play Flash games (`.swf`) on your PS Vita. Built on [Ruffle](https://ruffle.rs). Made by İbrahim Doğan.
 
-### What's new in 1.2.0
+### What's new in 1.3.0
 
-**Faster heavy games.**
+**Home screen bubbles.**
 
-- **Physics and 3D engines are compiled ahead of time.** The Box2D physics engine and the Alternativa3D 3D engine now run as native code instead of being interpreted. Happy Wheels takes 103 ms per frame instead of 207 ms, about twice as fast, and 3D games built on Alternativa3D such as 3D Taxi Racing speed up too. Other games that use the same engine versions get the same boost automatically.
-- **Physics speed.** A new per-game setting, **Physics speed: Fast**, lets physics games run a little looser in exchange for speed (Happy Wheels: from about 8 to 9–10 FPS on top of the above).
-- **Much less drawing work.** Shapes with solid colours, bitmaps and gradients are now drawn in batches. For example, Bloons Tower Defense 3 went from 627 draw calls per frame to 85, and A Koopa's Revenge 2 from 233 to 59.
-- **A faster interpreter.** In our tests, ActionScript 3 games do about 15% less work per frame and ActionScript 1/2 games about 6% less. Number conversions that went through a slow library call on the Vita are now a single instruction.
+- **Give any game its own bubble.** In a game's **Options → Home screen**, pick *Add to the home screen*. The bubble uses the game's cover as its round icon and LiveArea background, and **Start** goes straight into the game.
+- **Installed for you.** With **Enable Unsafe Homebrew** on (Settings → HENkaku Settings), RuffleVita installs the bubble itself in a few seconds and comes right back. With it off, RuffleVita saves a VPK in `ux0:data/rufflevita/bubbles/` and shows how to install it with VitaShell.
+- Bubbles follow dark mode, share your saves and settings with RuffleVita, and take under 10 MB each. Add them again after updating RuffleVita to bring them up to date.
+- **Direct launch from other launchers.** HexFlow, RetroFlow and Custom Bubbles can open a game with `psgm:play?titleid=RUFFLEVIT&param=ux0:data/FlashGames/<game>.swf`.
 
 **More games work.**
 
-- **Games that call dead web services keep going.** Many games call Kongregate, MindJolt, ad or score servers that no longer exist. Before, the failed call could stop a script halfway, so a button never reacted or a screen never moved on (for example the second **Continue** in Mega Drill). RuffleVita now answers the Kongregate and MindJolt APIs itself, and skips calls into missing objects instead of stopping the script.
-- **Buttons inside mask layers can be clicked.** Some games draw a button as a mask, like the **Start** on Stick War's mission scroll. Flash lets you click those, and now RuffleVita does too.
-- **Happy Wheels no longer crashes when a level loads.** Huge images that don't fit in the Vita's graphics memory are scaled down instead.
-- **Very deep recursion no longer closes RuffleVita.** The game gets Flash's "stack overflow" error instead, which it can handle.
-- **A damaged SWF in your library no longer crashes RuffleVita** while the library reads it.
+- **Space and letter keys in older games.** Games that wait for a key with `on (keyPress ...)` now react to the buttons bound to it, for example **Press SPACE** in Electric Man 2 and Murder. A letter the game listens for in the other case works too, like **C** for the car in Stick RPG.
+- **Text boxes no longer break the picture.** Drawing a text box's border or cursor turned the rest of the frame into a wireframe, for example on Stick RPG's name, bank and stock screens.
+- **PixelBender effects no longer stop a game.** It runs on without that effect.
+- **Games packed with Apparat's Matryoshka** unpack in under a second instead of timing out, for example Super Mario Crossover 3. The settings file it used to download from a server that no longer exists is built in.
 
-**Saves.**
+**Smaller and steadier.**
 
-- Each game now keeps its saves in its own folder, `ux0:data/rufflevita/saves/<Game> [id]/`, instead of a deep tree named after its file path. Games that used the same save name no longer overwrite each other's saves.
-- Your existing saves move over automatically the first time each game loads them. Nothing to do.
-- Saves are also written every 30 seconds while you play, so turning the Vita off keeps your progress. A save is written to a temporary file first, so a power cut can't leave a half-written one.
+- **Less memory.** Games are unpacked while they're read instead of being held twice, sounds no longer copy the game's data, and the fallback font only loads when a game needs it. Electric Man 2 needs 35 MB instead of 44, A Koopa's Revenge 2 58 MB instead of 73.
+- **Running out of memory ends the game, not RuffleVita.** You're back in the library with a message instead of a crash.
+- **A smaller download.** RuffleVita itself is now under 10 MB instead of 27.
 
 **Library.**
 
-- **Dark mode.** Turn it on in any game's settings under **Display → Dark mode (launcher)**. It applies to the library, Explore and the menus, not to games.
-- **Better game names.** Many SWFs carry a placeholder title such as "Adobe Flex 4 Application", "Untitled-1" or the publisher's name. Those are now ignored and the file name is shown instead.
+- **New games show up by themselves.** Copy `.swf` files over FTP or USB while RuffleVita is open and they appear in the library within a few seconds; no refresh needed.
+- **Options has a General tab** for what applies everywhere: V-Sync, dark mode and refreshing the Explore catalog.
 
 ### Install
 
