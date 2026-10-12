@@ -14,7 +14,7 @@
 - **Space and letter keys in older games.** Games that wait for a key with `on (keyPress ...)` now react to the buttons bound to it, for example **Press SPACE** in Electric Man 2 and Murder. A letter the game listens for in the other case works too, like **C** for the car in Stick RPG.
 - **Text boxes no longer break the picture.** Drawing a text box's border or cursor turned the rest of the frame into a wireframe, for example on Stick RPG's name, bank and stock screens.
 - **PixelBender effects no longer stop a game.** It runs on without that effect.
-- **Games packed with Apparat's Matryoshka** unpack in under a second instead of timing out, for example Super Mario Crossover 3. The settings file it used to download from a server that no longer exists is built in.
+- **Games packed with Apparat's Matryoshka** unpack in under a second instead of timing out.
 
 **Smaller and steadier.**
 
