@@ -160,6 +160,28 @@ pub fn apply_autorun() -> Vec<String> {
     keys
 }
 
+/// The `.swf` a launcher asked for. HexFlow, RetroFlow and Custom Bubbles
+/// start the app with `psgm:play?titleid=RUFFLEVIT&param=<path>`; a desktop
+/// build takes the path as its first argument.
+pub fn launch_param() -> Option<String> {
+    #[cfg(target_os = "vita")]
+    let param = {
+        let mut buf = [0u8; 1024];
+        // SAFETY: the buffer is the 1024 bytes the call fills.
+        if unsafe { vitasdk_sys::sceAppMgrGetAppParam(buf.as_mut_ptr().cast()) } < 0 {
+            return None;
+        }
+        let text = std::ffi::CStr::from_bytes_until_nul(&buf).ok()?.to_str().ok()?;
+        if !text.contains("psgm:play") {
+            return None;
+        }
+        text.split_once("&param=")?.1.to_owned()
+    };
+    #[cfg(not(target_os = "vita"))]
+    let param = std::env::args().nth(1)?;
+    Some(param).filter(|p| !p.is_empty())
+}
+
 /// Asks macOS to keep the main thread on the performance cores even though
 /// the app has no visible window (otherwise it counts as background work).
 #[cfg(not(target_os = "vita"))]

@@ -1300,6 +1300,13 @@ impl Player {
             // so that KeyPress is always fired after KeyDown.
             let key_press_handled = if let Some(button_event) = button_event {
                 context.stage.handle_clip_event(context, button_event) == ClipEventResult::Handled
+                    // RuffleVita: a pad has no Shift or Caps Lock habit, so a
+                    // letter nobody listens for tries the other case too
+                    // (Stick RPG drives on `keyPress "C"`). Not while typing.
+                    || (context.focus_tracker.get_as_edit_text().is_none()
+                        && other_case(button_event).is_some_and(|event| {
+                            context.stage.handle_clip_event(context, event) == ClipEventResult::Handled
+                        }))
             } else {
                 false
             };
@@ -3233,4 +3240,16 @@ pub enum PlayerMode {
 
     /// Represents the debug version of Flash Player, i.e. flashplayerdebugger.
     Debug,
+}
+
+/// RuffleVita: `keyPress` of an ASCII letter with the other case.
+fn other_case<'gc>(event: ClipEvent<'gc>) -> Option<ClipEvent<'gc>> {
+    let ClipEvent::KeyPress { key_code } = event else { return None };
+    let c = key_code.to_u8();
+    let swapped = match c {
+        b'a'..=b'z' => c.to_ascii_uppercase(),
+        b'A'..=b'Z' => c.to_ascii_lowercase(),
+        _ => return None,
+    };
+    ButtonKeyCode::from_u8(swapped).map(|key_code| ClipEvent::KeyPress { key_code })
 }

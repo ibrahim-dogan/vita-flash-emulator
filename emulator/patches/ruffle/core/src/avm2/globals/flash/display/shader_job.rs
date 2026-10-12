@@ -236,11 +236,19 @@ pub fn start<'gc>(
         }
     }
 
-    let output = activation
-        .context
-        .renderer
-        .run_pixelbender_shader(shader_handle, &arguments, &pixel_bender_target)
-        .expect("Failed to run shader");
+    // RuffleVita: the glow backend can't run shaders; skip the job instead of
+    // stopping the game.
+    let output = match activation.context.renderer.run_pixelbender_shader(
+        shader_handle,
+        &arguments,
+        &pixel_bender_target,
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            tracing::warn!("ShaderJob skipped: {e}");
+            return Ok(Value::Undefined);
+        }
+    };
 
     match output {
         PixelBenderOutput::Bitmap(sync_handle) => {

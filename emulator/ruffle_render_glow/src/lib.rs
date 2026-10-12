@@ -1826,9 +1826,11 @@ impl RenderBackend for GlowRenderBackend {
 
     fn compile_pixelbender_shader(
         &mut self,
-        _shader: ruffle_render::pixel_bender::PixelBenderShader,
+        shader: ruffle_render::pixel_bender::PixelBenderShader,
     ) -> Result<ruffle_render::pixel_bender::PixelBenderShaderHandle, BitmapError> {
-        Err(BitmapError::Unimplemented("compile_pixelbender_shader".into()))
+        // Shaders aren't run here, but handing one back lets the game go on
+        // without the effect instead of stopping at `new Shader(...)`.
+        Ok(ruffle_render::pixel_bender::PixelBenderShaderHandle(Arc::new(UnrunShader(shader))))
     }
 
     fn resolve_sync_handle(
@@ -2175,6 +2177,17 @@ impl CommandHandler for GlowRenderBackend {
     fn render_alpha_mask(&mut self, maskee_commands: CommandList, _mask_commands: CommandList) {
         // Alpha masks need offscreen compositing; draw the maskee unmasked.
         maskee_commands.execute(self);
+    }
+}
+
+/// A PixelBender shader this backend can't run: blend shaders draw as normal,
+/// shader filters are skipped and `ShaderJob`s leave their target alone.
+#[derive(Debug)]
+struct UnrunShader(ruffle_render::pixel_bender::PixelBenderShader);
+
+impl ruffle_render::pixel_bender::PixelBenderShaderImpl for UnrunShader {
+    fn parsed_shader(&self) -> &ruffle_render::pixel_bender::PixelBenderShader {
+        &self.0
     }
 }
 

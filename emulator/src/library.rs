@@ -200,6 +200,22 @@ impl Library {
         self.games.iter().position(|g| g.key == key)
     }
 
+    /// The game a launcher named by path: `ux0:data/FlashGames/a/b.swf`,
+    /// `ux0:/data/...`, or just a path inside the games folder.
+    pub fn index_of_path(&self, path: &str) -> Option<usize> {
+        let norm = |s: &str| s.replace('\\', "/").replacen(":/", ":", 1).to_lowercase();
+        let wanted = norm(path.trim());
+        self.games
+            .iter()
+            .position(|g| norm(&g.path.to_string_lossy()) == wanted)
+            .or_else(|| {
+                self.games.iter().position(|g| {
+                    let key = g.key.to_lowercase();
+                    wanted == key || wanted.ends_with(&format!("/{key}"))
+                })
+            })
+    }
+
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut DbEntry)) {
         if let Some(g) = self.games.iter_mut().find(|g| g.key == key) {
             f(&mut g.db);

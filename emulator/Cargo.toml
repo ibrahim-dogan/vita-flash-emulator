@@ -53,6 +53,7 @@ vitasdk-sys = { version = "0.3.2", features = [
     "SceKernelThreadMgr_stub",
     "ScePower_stub",
     "SceRtc_stub",
+    "SceAppMgr_stub",
 ] }
 
 [patch.crates-io]

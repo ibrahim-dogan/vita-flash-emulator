@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext;
 use ruffle_core::backend::navigator::NullExecutor;
 use ruffle_core::config::Letterbox;
-use ruffle_core::events::{MouseButton, PlayerEvent, TextControlCode};
+use ruffle_core::events::{LogicalKey, MouseButton, PlayerEvent, TextControlCode};
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{Player, PlayerBuilder, PlayerRuntime, StageScaleMode};
 use ruffle_render_glow::GlowRenderBackend;
@@ -237,7 +237,14 @@ impl Session {
         let n = self.key_counts.entry(k).or_insert(0);
         *n += 1;
         if *n == 1 {
-            self.send(PlayerEvent::KeyDown { key: keys::get(k).descriptor() });
+            let info = keys::get(k);
+            self.send(PlayerEvent::KeyDown { key: info.descriptor() });
+            // A real keyboard also types the character. AVM1 buttons only see
+            // `on (keyPress "<Space>")` / `on (keyPress "a")` through that text
+            // event (Electric Man 2 and Murder start with Space this way).
+            if let LogicalKey::Character(c) = info.logical {
+                self.send(PlayerEvent::TextInput { codepoint: c });
+            }
         }
     }
 
