@@ -1890,6 +1890,8 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "color_quant",
+ "crc32fast",
  "encoding_rs",
  "flate2",
  "fontdue",
