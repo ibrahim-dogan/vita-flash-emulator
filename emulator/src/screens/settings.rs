@@ -1,5 +1,6 @@
-//! Per-game settings: button bindings, sticks and display options. Used from
-//! both the library and the in-game pause menu (where changes apply live).
+//! Settings: a game's button bindings, sticks and display options, and the
+//! launcher's own (General). Used from the library, Explore (General only)
+//! and the in-game pause menu (where changes apply live).
 
 use crate::config::{PhysicsMode, Profile, Quality, ScaleMode, StickMode};
 use crate::input::{Btn, InputEvent, Panel, TouchPhase};
@@ -13,14 +14,29 @@ pub enum SettingsResult {
     Changed,
     Close,
     MakeDefault,
-    /// Make a home screen bubble for this game.
-    MakeBubble,
+    /// Download Explore's game list again.
+    RefreshCatalog,
+    /// Give the game a home screen bubble.
+    AddBubble,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Controls,
     Display,
+    HomeScreen,
+    General,
+}
+
+impl Tab {
+    fn name(self) -> &'static str {
+        match self {
+            Tab::Controls => "Controls",
+            Tab::Display => "Display",
+            Tab::HomeScreen => "Home screen",
+            Tab::General => "General",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -38,7 +54,8 @@ enum Row {
     VSync,
     DarkMode,
     MakeDefault,
-    MakeBubble,
+    RefreshCatalog,
+    AddBubble,
 }
 
 const PANEL: Rect = Rect::new(96.0, 28.0, 768.0, 462.0);
@@ -47,30 +64,48 @@ const LIST_H: f32 = PANEL.h - 124.0;
 const ROW_H: f32 = 42.0;
 
 pub struct SettingsScreen {
-    pub game_name: String,
+    /// The game whose settings these are; `None` for General alone.
+    pub game_name: Option<String>,
     pub profile: Profile,
     pub vsync: bool,
     pub dark_mode: bool,
+    /// Opened from the pause menu: no launcher-only actions.
+    in_game: bool,
+    tabs: Vec<Tab>,
     tab: Tab,
     cursor: usize,
     scroll: f32,
     picker: Option<KeyPicker>,
-    tab_rects: [Rect; 2],
+    tab_rects: Vec<Rect>,
     touch_row: Option<usize>,
 }
 
 impl SettingsScreen {
-    pub fn new(game_name: String, profile: Profile, vsync: bool, dark_mode: bool) -> Self {
+    /// A game's settings (with General as the last tab), or with no game
+    /// just General.
+    pub fn new(game: Option<(String, Profile)>, vsync: bool, dark_mode: bool, in_game: bool) -> Self {
+        let tabs = match (&game, in_game) {
+            // A bubble from inside a game would end it: library only.
+            (Some(_), false) => vec![Tab::Controls, Tab::Display, Tab::HomeScreen, Tab::General],
+            (Some(_), true) => vec![Tab::Controls, Tab::Display, Tab::General],
+            (None, _) => vec![Tab::General],
+        };
+        let (game_name, profile) = match game {
+            Some((name, profile)) => (Some(name), profile),
+            None => (None, Profile::default()),
+        };
         Self {
             game_name,
             profile,
             vsync,
             dark_mode,
-            tab: Tab::Controls,
+            in_game,
+            tab: tabs[0],
+            tabs,
             cursor: 0,
             scroll: 0.0,
             picker: None,
-            tab_rects: [Rect::default(); 2],
+            tab_rects: Vec::new(),
             touch_row: None,
         }
     }
@@ -91,16 +126,28 @@ impl SettingsScreen {
                 Row::ShowFps,
                 Row::CursorSpeed,
                 Row::RearTouch,
-                Row::VSync,
-                Row::DarkMode,
                 Row::MakeDefault,
-                Row::MakeBubble,
             ],
+            Tab::HomeScreen => vec![Row::AddBubble],
+            Tab::General => {
+                let mut v = vec![Row::VSync, Row::DarkMode];
+                if !self.in_game {
+                    v.push(Row::RefreshCatalog);
+                }
+                v
+            }
         }
     }
 
-    fn switch_tab(&mut self) {
-        self.tab = if self.tab == Tab::Controls { Tab::Display } else { Tab::Controls };
+    /// Moves `dir` (+1/-1) tabs along, wrapping.
+    fn switch_tab(&mut self, dir: i32) {
+        let n = self.tabs.len() as i32;
+        let i = self.tabs.iter().position(|t| *t == self.tab).unwrap_or(0) as i32;
+        self.set_tab(self.tabs[(i + dir).rem_euclid(n) as usize]);
+    }
+
+    fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
         self.cursor = 0;
         self.scroll = 0.0;
     }
@@ -146,7 +193,8 @@ impl SettingsScreen {
                 SettingsResult::Changed
             }
             Row::MakeDefault => SettingsResult::MakeDefault,
-            Row::MakeBubble => SettingsResult::MakeBubble,
+            Row::RefreshCatalog => SettingsResult::RefreshCatalog,
+            Row::AddBubble => SettingsResult::AddBubble,
             other => {
                 if self.cycle(other, 1) {
                     SettingsResult::Changed
@@ -192,7 +240,7 @@ impl SettingsScreen {
                         if self.cycle(rows[self.cursor], dir) { SettingsResult::Changed } else { SettingsResult::None }
                     }
                     Btn::L | Btn::R => {
-                        self.switch_tab();
+                        self.switch_tab(if *b == Btn::L { -1 } else { 1 });
                         return SettingsResult::None;
                     }
                     Btn::Cross => self.activate(rows[self.cursor]),
@@ -212,8 +260,8 @@ impl SettingsScreen {
                             if !PANEL.contains(t.x, t.y) {
                                 SettingsResult::Close
                             } else if let Some(i) = self.tab_rects.iter().position(|r| r.contains(t.x, t.y)) {
-                                if (i == 0) != (self.tab == Tab::Controls) {
-                                    self.switch_tab();
+                                if self.tabs[i] != self.tab {
+                                    self.set_tab(self.tabs[i]);
                                     return SettingsResult::None;
                                 }
                                 SettingsResult::None
@@ -277,7 +325,7 @@ impl SettingsScreen {
             Row::VSync => (on_off(self.vsync), true),
             Row::DarkMode => (on_off(self.dark_mode), true),
             Row::CursorSpeed => (format!("{}", p.cursor_speed), true),
-            Row::ResetControls | Row::MakeDefault | Row::MakeBubble => (String::new(), false),
+            Row::ResetControls | Row::MakeDefault | Row::RefreshCatalog | Row::AddBubble => (String::new(), false),
         }
     }
 
@@ -294,9 +342,10 @@ impl SettingsScreen {
             Row::CursorSpeed => ("Stick cursor speed", None),
             Row::RearTouch => ("Rear touchpad as trackpad", Some("Drag to move the cursor, tap to click")),
             Row::VSync => ("V-Sync (all games)", Some("Off can raise FPS but may tear")),
-            Row::DarkMode => ("Dark mode (launcher)", Some("Dark menus and library; games are unaffected")),
+            Row::DarkMode => ("Dark mode", Some("Dark menus and library; games are unaffected")),
             Row::MakeDefault => ("Use these settings for new games", None),
-            Row::MakeBubble => ("Make a home screen bubble", Some("Saves a VPK to install with VitaShell")),
+            Row::RefreshCatalog => ("Refresh the Explore catalog", Some("Downloads the list of games again")),
+            Row::AddBubble => ("Add to the home screen", Some("A bubble that opens this game straight away")),
         }
     }
 
@@ -306,15 +355,17 @@ impl SettingsScreen {
 
         let cy = PANEL.y + 38.0;
         g.icon(Icon::Sliders, PANEL.x + 28.0, cy - 12.0, 24.0, theme::INK);
-        g.text_mid(FontId::Display, 26.0, PANEL.x + 62.0, cy + 1.0, theme::INK, "Game settings");
-        let name = g.ellipsize(FontId::Bold, 15.0, &self.game_name, 330.0);
-        g.text_mid_right(FontId::Bold, 15.0, PANEL.right() - 28.0, cy + 1.0, theme::MUTED, &name);
+        let heading = if self.game_name.is_some() { "Game settings" } else { "Settings" };
+        g.text_mid(FontId::Display, 26.0, PANEL.x + 62.0, cy + 1.0, theme::INK, heading);
+        if let Some(name) = &self.game_name {
+            let name = g.ellipsize(FontId::Bold, 15.0, name, 330.0);
+            g.text_mid_right(FontId::Bold, 15.0, PANEL.right() - 28.0, cy + 1.0, theme::MUTED, &name);
+        }
 
         // Tabs.
-        let rects = ui::tabs(g, PANEL.x + 28.0, PANEL.y + 82.0, &["Controls", "Display"], (self.tab == Tab::Display) as usize);
-        for (i, r) in rects.into_iter().enumerate().take(2) {
-            self.tab_rects[i] = r;
-        }
+        let names: Vec<&str> = self.tabs.iter().map(|t| t.name()).collect();
+        let active = self.tabs.iter().position(|t| *t == self.tab).unwrap_or(0);
+        self.tab_rects = ui::tabs(g, PANEL.x + 28.0, PANEL.y + 82.0, &names, active);
 
         // Rows.
         let rows = self.rows();
@@ -347,6 +398,14 @@ impl SettingsScreen {
                 }
                 Row::MakeDefault => {
                     g.icon(Icon::Check, lx, r.center_y() - 11.0, 22.0, ink);
+                    lx += 36.0;
+                }
+                Row::RefreshCatalog => {
+                    g.icon(Icon::Refresh, lx, r.center_y() - 11.0, 22.0, ink);
+                    lx += 36.0;
+                }
+                Row::AddBubble => {
+                    g.icon(Icon::Play, lx, r.center_y() - 11.0, 22.0, ink);
                     lx += 36.0;
                 }
                 _ => {}
@@ -382,12 +441,17 @@ impl SettingsScreen {
             Some(Row::Button(_)) => "Change",
             Some(Row::ResetControls) => "Reset",
             Some(Row::MakeDefault) => "Apply",
+            Some(Row::RefreshCatalog) => "Refresh",
+            Some(Row::AddBubble) => "Add",
             _ => "Toggle",
         };
         match &self.picker {
             Some(p) => p.draw(g),
-            None => {
+            None if self.tabs.len() > 1 => {
                 ui::footer(g, &[(Btn::R, "Tab"), (Btn::Circle, "Done"), (Btn::Cross, action)]);
+            }
+            None => {
+                ui::footer(g, &[(Btn::Circle, "Done"), (Btn::Cross, action)]);
             }
         }
     }

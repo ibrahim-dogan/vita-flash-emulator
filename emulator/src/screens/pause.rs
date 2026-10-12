@@ -31,11 +31,13 @@ pub struct PauseMenu {
     touch: Option<usize>,
     /// Confirmation for destructive actions.
     confirm: Option<PauseAction>,
+    /// In a game's home screen bubble, where quitting closes the app.
+    standalone: bool,
 }
 
 impl PauseMenu {
-    pub fn new() -> Self {
-        Self { sel: 0, touch: None, confirm: None }
+    pub fn new(standalone: bool) -> Self {
+        Self { sel: 0, touch: None, confirm: None, standalone }
     }
 
     fn item_rect(i: usize) -> Rect {
@@ -130,7 +132,11 @@ impl PauseMenu {
             }
             let ink = if selected { theme::ON_ACCENT } else { theme::INK };
             g.icon(*icon, r.x + 16.0, r.center_y() - 11.0, 22.0, ink);
-            let text = if confirming { "Press Cross again to confirm" } else { label };
+            let text = match (confirming, action) {
+                (true, _) => "Press Cross again to confirm",
+                (false, PauseAction::Quit) if self.standalone => "Quit game",
+                _ => label,
+            };
             g.text_mid(FontId::Bold, 16.5, r.x + 52.0, r.center_y(), ink, text);
         }
         ui::footer(g, &[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);

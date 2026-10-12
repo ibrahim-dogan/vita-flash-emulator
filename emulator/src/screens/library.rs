@@ -15,8 +15,9 @@ pub enum LibAction {
     None,
     Play(usize),
     Settings(usize),
+    /// The launcher's own settings (General), when there's no game.
+    AppSettings,
     ToggleSort,
-    Rescan,
     SwitchTab(Tab),
 }
 
@@ -110,10 +111,9 @@ impl LibraryScreen {
                 Btn::Right if n > 0 => this.selected = (this.selected + 6).min(n - 1),
                 Btn::L | Btn::R => return LibAction::SwitchTab(Tab::Explore),
                 Btn::Cross if n > 0 => return LibAction::Play(this.selected),
-                Btn::Cross => return LibAction::Rescan,
                 Btn::Triangle if n > 0 => return LibAction::Settings(this.selected),
+                Btn::Triangle => return LibAction::AppSettings,
                 Btn::Square if n > 0 => return LibAction::ToggleSort,
-                Btn::Select => return LibAction::Rescan,
                 _ => {}
             }
             LibAction::None
@@ -201,7 +201,7 @@ impl LibraryScreen {
 
         if lib.games.is_empty() {
             empty_state(g);
-            self.footer_targets = ui::footer(g, &[(Btn::R, "Explore"), (Btn::Cross, "Refresh")]);
+            self.footer_targets = ui::footer(g, &[(Btn::Triangle, "Options"), (Btn::R, "Explore")]);
             ui::footer_credit(g);
             return;
         }
@@ -237,7 +237,7 @@ impl LibraryScreen {
         };
         self.footer_targets = ui::footer(
             g,
-            &[(Btn::Square, sort_label), (Btn::Triangle, "Settings"), (Btn::Cross, "Play")],
+            &[(Btn::Square, sort_label), (Btn::Triangle, "Options"), (Btn::Cross, "Play")],
         );
         ui::footer_credit(g);
     }
@@ -245,7 +245,7 @@ impl LibraryScreen {
 
 /// Cover colour for a game without art: its SWF background when that's
 /// colourful, else one picked by name.
-fn placeholder_color(game: &Game) -> Color {
+pub fn placeholder_color(game: &Game) -> Color {
     if let Some([r, gg, b]) = game.db.info.as_ref().and_then(|i| i.background) {
         let (max, min) = (r.max(gg).max(b) as f32, r.min(gg).min(b) as f32);
         // Only colourful backgrounds; white/black/grey ones make dull covers.
@@ -355,19 +355,15 @@ fn empty_state(g: &mut Gfx) {
     let pill = Rect::new((card.center_x() - w * 0.5).round(), card.y + 194.0, w.round(), 36.0);
     g.rounded_outline(pill, 10.0, 2.0, theme::INK, theme::SUN);
     g.text_mid_center(FontId::Bold, 17.0, pill.center_x(), pill.center_y(), theme::ON_ACCENT, &path);
-    // "or find some in Explore (R), then press (X) to refresh." with real glyphs.
-    let (a, b, c) = ("Find some in", "Explore, or press", "to refresh.");
+    // "They show up here by themselves, or find some in (R) Explore." with a real glyph.
+    let (a, b) = ("They show up here by themselves, or find some in", "Explore.");
     let size = 22.0;
     let rw = ui::button_glyph_width(g, Btn::R, size);
-    let widths = [g.measure(FontId::Regular, 15.0, a), g.measure(FontId::Regular, 15.0, b), g.measure(FontId::Regular, 15.0, c)];
-    let total = widths.iter().sum::<f32>() + rw + size + 6.0 * 8.0;
+    let total = g.measure(FontId::Regular, 15.0, a) + rw + g.measure(FontId::Regular, 15.0, b) + 2.0 * 8.0;
     let mut x = card.center_x() - total * 0.5;
     let cy = card.y + 270.0;
     x += g.text_mid(FontId::Regular, 15.0, x, cy, theme::MUTED, a) + 8.0;
     ui::button_glyph(g, Btn::R, x + rw * 0.5, cy, size);
     x += rw + 8.0;
-    x += g.text_mid(FontId::Regular, 15.0, x, cy, theme::MUTED, b) + 8.0;
-    ui::button_glyph(g, Btn::Cross, x + size * 0.5, cy, size);
-    x += size + 8.0;
-    g.text_mid(FontId::Regular, 15.0, x, cy, theme::MUTED, c);
+    g.text_mid(FontId::Regular, 15.0, x, cy, theme::MUTED, b);
 }

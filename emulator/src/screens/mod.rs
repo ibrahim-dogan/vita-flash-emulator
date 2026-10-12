@@ -1,5 +1,6 @@
 //! Full-screen views and modal overlays.
 
+pub mod bubble;
 pub mod explore;
 pub mod keypicker;
 pub mod library;

@@ -1,9 +1,7 @@
 //! Everything that differs between the PS Vita and a desktop dev build:
 //! storage locations, clocks, battery, time.
 
-use std::path::PathBuf;
-#[cfg(target_os = "vita")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const SCREEN_W: u32 = 960;
 pub const SCREEN_H: u32 = 544;
@@ -180,6 +178,41 @@ pub fn launch_param() -> Option<String> {
     #[cfg(not(target_os = "vita"))]
     let param = std::env::args().nth(1)?;
     Some(percent_decode(&param)).filter(|p| !p.is_empty())
+}
+
+/// The game a home screen bubble opens: RuffleVita running from a bubble
+/// (see `bubble.rs`) finds its percent-encoded path in `app0:game.txt`.
+pub fn bubble_game() -> Option<String> {
+    #[cfg(target_os = "vita")]
+    {
+        let text = std::fs::read_to_string("app0:game.txt").ok()?;
+        Some(percent_decode(text.trim())).filter(|p| !p.is_empty())
+    }
+    #[cfg(not(target_os = "vita"))]
+    {
+        None
+    }
+}
+
+/// Whether RuffleVita's bubble installer (`installer/installer.c`) ships
+/// with this copy of the app: not in a bubble, nor on the desktop.
+pub fn has_installer() -> bool {
+    cfg!(target_os = "vita") && Path::new("app0:installer.bin").exists()
+}
+
+/// Replaces RuffleVita with its bubble installer, which goes back to
+/// RuffleVita when it's done. Only returns if that couldn't start.
+pub fn exec_installer() -> std::io::Error {
+    #[cfg(target_os = "vita")]
+    {
+        // SAFETY: a C string and no arguments; on success this never returns.
+        let r = unsafe { vitasdk_sys::sceAppMgrLoadExec(c"app0:installer.bin".as_ptr(), std::ptr::null(), std::ptr::null()) };
+        std::io::Error::other(format!("couldn't start the installer ({:#010X})", r as u32))
+    }
+    #[cfg(not(target_os = "vita"))]
+    {
+        std::io::Error::other("the installer only runs on a Vita")
+    }
 }
 
 /// Undoes the `%XX` escapes home screen bubbles use (see `bubble.rs`);

@@ -366,7 +366,6 @@ impl ExploreScreen {
                 let keep = self.selected_entry().map(|e| e.slug.clone());
                 self.rebuild_view(keep);
             }
-            Btn::Select => self.refresh(fetcher),
             Btn::Cross => return self.primary(fetcher),
             _ => {}
         }

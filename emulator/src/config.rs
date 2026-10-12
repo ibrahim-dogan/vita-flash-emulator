@@ -243,6 +243,11 @@ pub struct Settings {
     pub dark_mode: bool,
     /// Template for games that have no profile of their own yet.
     pub default_profile: Profile,
+    /// Skip the VitaShell instructions when a bubble is saved as a VPK.
+    pub hide_bubble_help: bool,
+    /// The bubble installer had no permission ("Enable Unsafe Homebrew" is
+    /// off): save VPKs straight away instead of restarting to find out.
+    pub bubble_install_denied: bool,
 }
 
 impl Default for Settings {
@@ -253,6 +258,8 @@ impl Default for Settings {
             vsync: true,
             dark_mode: false,
             default_profile: Profile::default(),
+            hide_bubble_help: false,
+            bubble_install_denied: false,
         }
     }
 }
