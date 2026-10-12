@@ -329,6 +329,16 @@ fn run() -> anyhow::Result<()> {
             Some(i) => app.start_game(i),
             None => tracing::warn!("RUFFLEVITA_AUTOSTART: no game {game:?}"),
         }
+    } else if let Some(path) = platform::launch_param() {
+        // Started from a launcher (HexFlow, RetroFlow, a custom bubble).
+        tracing::info!("launch param: {path}");
+        match app.lib.index_of_path(&path) {
+            Some(i) => app.start_game(i),
+            None => {
+                let msg = format!("Not in {}: {path}", platform::games_dir_display());
+                app.toast = Some(Toast::lasting(msg, 8000));
+            }
+        }
     }
     app.run(&mut event_pump);
     drop(gl_context);

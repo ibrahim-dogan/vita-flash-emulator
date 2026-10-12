@@ -100,12 +100,21 @@ impl LocalNavigator {
 /// `assets/stubs` (see the comment there) keeps them going.
 static PORTAL_API_STUB: &[u8] = include_bytes!("../../assets/stubs/portal_api.swf");
 
+/// Super Mario Bros. Crossover won't start without the settings file it
+/// downloads from Exploding Rabbit, whose server is gone. This is the copy
+/// the Wayback Machine kept (2017-05-20).
+static SMBC_DATA: &[u8] = include_bytes!("../../assets/stubs/smbc_data.txt.gz");
+
 /// The stand-in for a URL that loads a known online API, if there is one.
 fn api_stub(url: &Url) -> Option<&'static [u8]> {
     let host = url.host_str()?.to_ascii_lowercase();
     let file = url.path().rsplit('/').next()?.to_ascii_lowercase();
     let portal = host.ends_with("kongregate.com") || host.ends_with("mindjolt.com");
-    (portal && file.starts_with("api_as3") && file.ends_with(".swf")).then_some(PORTAL_API_STUB)
+    if portal && file.starts_with("api_as3") && file.ends_with(".swf") {
+        return Some(PORTAL_API_STUB);
+    }
+    let smbc = host == "data.explodingrabbit.com" && url.path() == "/super-mario-bros-crossover/data.txt.gz";
+    smbc.then_some(SMBC_DATA)
 }
 
 /// A response served from memory.
@@ -300,6 +309,8 @@ mod tests {
             assert!(api_stub(&Url::parse(u).unwrap()).is_some(), "{u}");
         }
         assert!(api_stub(&Url::parse("http://www.kongregate.com/games/x.swf").unwrap()).is_none());
+        let smbc = "http://data.explodingrabbit.com/super-mario-bros-crossover/data.txt.gz";
+        assert!(api_stub(&Url::parse(smbc).unwrap()).is_some());
         assert!(api_stub(&Url::parse("file:///ux0:data/FlashGames/API_AS3_Local.swf").unwrap()).is_none());
     }
 

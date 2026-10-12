@@ -16,6 +16,7 @@
 //! See docs/AOT.md.
 
 mod generated;
+mod natives;
 #[allow(dead_code)] // Only what the generated code uses is used.
 pub mod rt;
 pub mod translate;
@@ -126,6 +127,9 @@ fn enabled() -> bool {
     })
 }
 
+/// `aot_slot` of a method replaced by `natives::apparat_lzma_code`.
+const SLOT_APPARAT_LZMA: u16 = u16::MAX;
+
 /// The compiled version of `method`, if there is one for exactly this op
 /// stream. Decided on the first call and remembered on the method.
 #[cfg_attr(feature = "rv_outline", inline(never))]
@@ -134,6 +138,7 @@ pub fn lookup(method: Method<'_>) -> Option<AotFn> {
     match method.aot_slot() {
         0 => resolve(method),
         1 => None,
+        SLOT_APPARAT_LZMA => Some(natives::apparat_lzma_code),
         slot => Some(generated::TABLE[slot as usize - 2].run),
     }
 }
@@ -142,7 +147,7 @@ pub fn lookup(method: Method<'_>) -> Option<AotFn> {
 #[inline(always)]
 pub fn leaf(method: Method<'_>) -> Option<LeafFn> {
     match method.aot_slot() {
-        0 | 1 => None,
+        0 | 1 | SLOT_APPARAT_LZMA => None,
         slot => generated::TABLE[slot as usize - 2].leaf,
     }
 }
@@ -150,6 +155,10 @@ pub fn leaf(method: Method<'_>) -> Option<LeafFn> {
 #[cold]
 #[inline(never)]
 fn resolve(method: Method<'_>) -> Option<AotFn> {
+    if natives::is_apparat_lzma_code(method) {
+        method.set_aot_slot(SLOT_APPARAT_LZMA);
+        return Some(natives::apparat_lzma_code);
+    }
     let found = enabled().then(|| find(method)).flatten();
     method.set_aot_slot(found.map_or(1, |i| i as u16 + 2));
     found.map(|i| generated::TABLE[i].run)
