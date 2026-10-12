@@ -11,9 +11,18 @@ RUN apk add --no-cache \
         bash \
         build-base
 
+# The native libraries are pinned to the commits RuffleVita 1.2.0 was built
+# with: vitaGL's master stopped building on 2026-10-11 (1a3b247, gxm.c uses
+# pthread_create without including pthread.h), and a release shouldn't pick
+# up graphics changes nobody tested.
+ARG SDL_COMMIT=f99bb638f7eb256fa812e9da15d4e295a170640c
+ARG VITASHARK_COMMIT=df24065e65098b2d1ac533760109ad4367573f28
+ARG VITAGL_COMMIT=36f512ea80a9cdf9c01875ec163313bda7cd26b6
+
 # --- Northfear's SDL2 fork with the VITA_VGL video backend -----------------
-RUN git clone --depth=1 https://github.com/Northfear/SDL /opt/SDL && \
-    cd /opt/SDL && \
+RUN git init -q /opt/SDL && cd /opt/SDL && \
+    git fetch -q --depth=1 https://github.com/Northfear/SDL "$SDL_COMMIT" && \
+    git checkout -q FETCH_HEAD && \
     cmake -S. -Bbuild \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
         -DCMAKE_TOOLCHAIN_FILE=${VITASDK}/share/vita.toolchain.cmake \
@@ -24,8 +33,9 @@ RUN git clone --depth=1 https://github.com/Northfear/SDL /opt/SDL && \
     cmake --install build
 
 # --- vitaShaRK (runtime shader compiler used by vitaGL) ---------------------
-RUN git clone --depth=1 https://github.com/Rinnegatamante/vitaShaRK /opt/vitaShaRK && \
-    cd /opt/vitaShaRK && \
+RUN git init -q /opt/vitaShaRK && cd /opt/vitaShaRK && \
+    git fetch -q --depth=1 https://github.com/Rinnegatamante/vitaShaRK "$VITASHARK_COMMIT" && \
+    git checkout -q FETCH_HEAD && \
     make install -j"$(nproc)"
 
 # --- vitaGL -----------------------------------------------------------------
@@ -33,8 +43,9 @@ RUN git clone --depth=1 https://github.com/Rinnegatamante/vitaShaRK /opt/vitaSha
 # NO_DEBUG: drops per-call error checking/logging (a large CPU cost).
 # NO_SPLASHSCREEN: no animated vitaGL logo at boot.
 # The rest matches what ruffle4consoles was tuned and tested with.
-RUN git clone --depth=1 https://github.com/Rinnegatamante/vitaGL /opt/vitaGL && \
-    cd /opt/vitaGL && \
+RUN git init -q /opt/vitaGL && cd /opt/vitaGL && \
+    git fetch -q --depth=1 https://github.com/Rinnegatamante/vitaGL "$VITAGL_COMMIT" && \
+    git checkout -q FETCH_HEAD && \
     make NO_SPLASHSCREEN=1 HAVE_GLSL_SUPPORT=1 NO_DEBUG=1 PRIMITIVES_SPEEDHACK=1 CIRCULAR_VERTEX_POOL=2 \
          USE_SCRATCH_MEMORY=1 HAVE_CUSTOM_HEAP=1 HAVE_PTHREAD=1 install -j"$(nproc)"
 

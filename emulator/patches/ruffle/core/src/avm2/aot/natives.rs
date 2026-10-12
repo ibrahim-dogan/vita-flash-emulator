@@ -37,6 +37,12 @@ pub fn apparat_lzma_code<'gc>(
     }
 }
 
+#[cfg(not(feature = "lzma"))]
+fn decode(_input: Value<'_>, _output: Value<'_>) -> Option<()> {
+    None
+}
+
+#[cfg(feature = "lzma")]
 fn decode(input: Value<'_>, output: Value<'_>) -> Option<()> {
     let (input, output) = (input.as_object()?, output.as_object()?);
     let unpacked = {
