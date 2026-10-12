@@ -38,6 +38,7 @@ use input::{Input, InputEvent};
 use library::Library;
 use platform::{SCREEN_H, SCREEN_W};
 use fetcher::Fetcher;
+use screens::bubble::{BubbleAction, BubblePrompt, Stage as BubbleStage};
 use screens::explore::{ExploreAction, ExploreScreen};
 use screens::library::{LibAction, LibraryScreen};
 use screens::{Tab, ThumbCache};
@@ -345,14 +346,29 @@ fn run() -> anyhow::Result<()> {
 
     let mut event_pump = sdl.event_pump().map_err(anyhow::Error::msg)?;
     let mut app = App::new(gl, gfx, settings, window, video, audio, gc, controllers);
+    // Back from the bubble installer (not in a bubble: that's RuffleVita's).
+    if let Some(done) = platform::bubble_game().is_none().then(bubble::take_installed).flatten() {
+        app.bubble_installed(done);
+    }
     // Development: open a game straight away (`RUFFLEVITA_AUTOSTART=<file in the games folder>`).
     if let Ok(game) = std::env::var("RUFFLEVITA_AUTOSTART") {
         match app.lib.index_of(&game) {
             Some(i) => app.start_game(i),
             None => tracing::warn!("RUFFLEVITA_AUTOSTART: no game {game:?}"),
         }
+    } else if let Some(path) = platform::bubble_game() {
+        // This is a home screen bubble: play its game, and quitting it quits.
+        tracing::info!("bubble for {path}");
+        app.standalone = true;
+        match app.lib.index_of_path(&path) {
+            Some(i) => app.start_game(i),
+            None => {
+                let msg = format!("Not in {}: {path}", platform::games_dir_display());
+                app.toast = Some(Toast::lasting(msg, 8000));
+            }
+        }
     } else if let Some(path) = platform::launch_param() {
-        // Started from a launcher (HexFlow, RetroFlow, a custom bubble).
+        // Started from a launcher (HexFlow, RetroFlow, Custom Bubbles).
         tracing::info!("launch param: {path}");
         match app.lib.index_of_path(&path) {
             Some(i) => app.start_game(i),
@@ -375,7 +391,9 @@ enum Mode {
 
 enum Modal {
     Pause(PauseMenu),
-    Settings { screen: SettingsScreen, key: String, original: config::Profile, from_pause: bool },
+    /// `key` is the game's, or `None` for the launcher's settings alone.
+    Settings { screen: SettingsScreen, key: Option<String>, original: config::Profile, from_pause: bool },
+    Bubble(BubblePrompt),
 }
 
 struct App {
@@ -407,6 +425,12 @@ struct App {
     last_draw: Instant,
     script: Option<script::Script>,
     recorder: Option<script::Recorder>,
+    /// When the games folder was last looked at for new or removed games.
+    last_rescan: Instant,
+    /// The last button press or touch in the launcher.
+    last_input: Instant,
+    /// Running as a game's home screen bubble: quitting the game quits.
+    standalone: bool,
 }
 
 impl App {
@@ -451,6 +475,9 @@ impl App {
             last_draw: Instant::now(),
             script: script::Script::from_env(),
             recorder: None,
+            last_rescan: Instant::now(),
+            last_input: Instant::now(),
+            standalone: false,
         };
         if let Some(i) = app.settings.last_game.as_deref().and_then(|k| app.lib.index_of(k)) {
             app.lib_screen.select(i, &app.lib);
@@ -549,6 +576,10 @@ impl App {
             if !events.is_empty() || got_results {
                 self.busy_until = Instant::now() + Duration::from_millis(600);
             }
+            if !events.is_empty() {
+                self.last_input = Instant::now();
+            }
+            self.rescan_now_and_then();
             self.update_ui(&events, dt);
 
             // In the library with nothing moving, drop to ~2 fps (clock and
@@ -637,27 +668,100 @@ impl App {
 
     // ------------------------------------------------------------- flow
 
-    /// Writes a home screen bubble VPK for a game, from its cover.
-    fn make_bubble(&mut self, key: &str) {
-        let Some(game) = self.lib.index_of(key).map(|i| &self.lib.games[i]) else { return };
-        let (title, path) = (game.title().to_owned(), game.path.clone());
-        let Some((cover, _)) = thumbs::load(key) else {
-            self.toast = Some(Toast::lasting("Set a cover first: pause the game and pick Set cover", 4000));
-            return;
-        };
-        let written = bubble::render(&mut self.gfx, &self.gl, &cover, &title)
-            .ok_or_else(|| std::io::Error::other("couldn't draw the images"))
-            .and_then(|pictures| bubble::write_vpk(key, &title, &path, &pictures));
-        self.toast = Some(match written {
-            Ok(vpk) => {
-                tracing::info!("bubble written to {}", vpk.display());
-                Toast::lasting(format!("Bubble saved to {}. Install it with VitaShell.", vpk.display()), 8000)
-            }
+    /// Shows what a game's home screen bubble will look like, to add it.
+    fn open_bubble(&mut self, index: usize) {
+        let Some(game) = self.lib.games.get(index) else { return };
+        let (key, title) = (game.key.clone(), game.title().to_owned());
+        let placeholder = screens::library::placeholder_color(game);
+        let cover = thumbs::load(&key).map(|(img, _)| img);
+        match bubble::render(&mut self.gfx, &self.gl, cover.as_ref(), &title, placeholder) {
+            Some(pictures) => self.modal = Some(Modal::Bubble(BubblePrompt::new(&self.gfx, key, title, pictures, bubble::size_estimate()))),
+            None => self.toast = Some(Toast::new("Couldn't draw the bubble's pictures")),
+        }
+        self.input.clear_events();
+    }
+
+    /// Installs the bubble (or saves its VPK); the prompt has shown "Adding…".
+    fn add_bubble(&mut self, prompt: BubblePrompt) {
+        self.input.clear_events();
+        let path = self.lib.index_of(&prompt.key).map(|i| self.lib.games[i].path.clone());
+        let Some(path) = path else { return };
+        let id = bubble::title_id(&prompt.key);
+        let files = match bubble::files(&id, &prompt.title, &path, &prompt.pictures) {
+            Ok(f) => f,
             Err(e) => {
-                tracing::warn!("bubble for {key}: {e}");
-                Toast::lasting(format!("Couldn't make the bubble: {e}"), 5000)
+                tracing::warn!("bubble for {}: {e}", prompt.key);
+                self.toast = Some(Toast::lasting(format!("Couldn't add the bubble: {e}"), 6000));
+                return;
             }
-        });
+        };
+        if platform::has_installer() && !self.settings.bubble_install_denied {
+            // The installer takes over the process and starts RuffleVita
+            // again when it's done; `bubble_installed` picks up from there.
+            match bubble::stage(&id, &prompt.key, &prompt.title, &files) {
+                Ok(()) => {
+                    if let Err(e) = bubble::write_install_screen(&mut self.gfx, &self.gl, &prompt.title) {
+                        tracing::warn!("bubble installer screen: {e}");
+                    }
+                    self.lib.save_if_dirty();
+                    self.settings.save();
+                    self.explore.save();
+                    let e = platform::exec_installer();
+                    tracing::warn!("bubble for {}: {e}", prompt.key);
+                    bubble::clean_stage();
+                }
+                Err(e) => tracing::warn!("bubble for {}: couldn't unpack it: {e}", prompt.key),
+            }
+        }
+        match bubble::write_vpk(&id, &prompt.title, &files) {
+            Ok(vpk) => self.show_saved_bubble(prompt, &vpk),
+            Err(e) => {
+                tracing::warn!("bubble for {}: {e}", prompt.key);
+                self.toast = Some(Toast::lasting(format!("Couldn't add the bubble: {e}"), 6000));
+            }
+        }
+    }
+
+    /// The bubble became a VPK: say where, and how to install it.
+    fn show_saved_bubble(&mut self, mut prompt: BubblePrompt, vpk: &std::path::Path) {
+        tracing::info!("bubble saved to {}", vpk.display());
+        let shown = vpk.to_string_lossy().into_owned();
+        if self.settings.hide_bubble_help {
+            self.toast = Some(Toast::lasting(format!("Saved {shown}; install it with VitaShell"), 6000));
+        } else {
+            prompt.stage = BubbleStage::Saved { path: shown, denied: self.settings.bubble_install_denied };
+            self.modal = Some(Modal::Bubble(prompt));
+        }
+    }
+
+    /// Back from the bubble installer: say how it went.
+    fn bubble_installed(&mut self, done: bubble::Installed) {
+        if let Some(i) = self.lib.index_of(&done.game_key) {
+            self.lib_screen.select(i, &self.lib);
+        }
+        let failure = match done.outcome {
+            bubble::Outcome::Done => {
+                bubble::clean_stage();
+                self.toast = Some(Toast::lasting(format!("{} is on the home screen", done.title), 5000));
+                return;
+            }
+            bubble::Outcome::Denied => {
+                self.settings.bubble_install_denied = true;
+                self.settings.save();
+                None
+            }
+            bubble::Outcome::Failed(code) => Some(code),
+        };
+        match bubble::vpk_from_stage(&done.id, &done.title) {
+            Ok(vpk) => {
+                let prompt = BubblePrompt::new(&self.gfx, done.game_key, done.title, Vec::new(), None);
+                self.show_saved_bubble(prompt, &vpk);
+            }
+            Err(e) => tracing::warn!("bubble for {}: no VPK either: {e}", done.game_key),
+        }
+        if let Some(code) = failure {
+            self.toast = Some(Toast::lasting(format!("The system wouldn't install it ({code})"), 6000));
+        }
     }
 
     fn start_game(&mut self, index: usize) {
@@ -734,16 +838,23 @@ impl App {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             self.gl.disable(glow::SCISSOR_TEST);
         }
+        // From a bubble too: show the library and say why, don't just vanish.
+        self.standalone = false;
         self.quit_to_library();
         self.toast = Some(Toast::lasting(format!("{name} stopped: {}", crash_message()), 8000));
     }
 
     fn quit_to_library(&mut self) {
+        if self.standalone {
+            self.input.quit = true;
+            return;
+        }
         let key = self.session.as_ref().map(|s| s.key.clone());
         self.session = None;
         self.modal = None;
         self.mode = Mode::Library;
         self.worker.set_throttled(false);
+        self.rescan_library();
         self.lib.sort(self.settings.sort);
         if let Some(i) = key.and_then(|k| self.lib.index_of(&k)) {
             self.lib_screen.select(i, &self.lib);
@@ -757,7 +868,7 @@ impl App {
             s.release_all();
             s.set_running(false);
         }
-        self.modal = Some(Modal::Pause(PauseMenu::new()));
+        self.modal = Some(Modal::Pause(PauseMenu::new(self.standalone)));
         self.input.clear_events();
     }
 
@@ -769,17 +880,22 @@ impl App {
         self.input.clear_events();
     }
 
-    fn open_settings(&mut self, key: String, name: String, from_pause: bool) {
-        let profile = match &self.session {
-            Some(s) if s.key == key => s.profile.clone(),
-            _ => self.settings.load_profile(&key),
+    /// A game's settings, or with `None` the launcher's own.
+    fn open_settings(&mut self, game: Option<(String, String)>, from_pause: bool) {
+        let (key, game) = match game {
+            Some((key, name)) => {
+                let profile = match &self.session {
+                    Some(s) if s.key == key => s.profile.clone(),
+                    _ => self.settings.load_profile(&key),
+                };
+                (Some(key), Some((name, profile)))
+            }
+            None => (None, None),
         };
-        self.modal = Some(Modal::Settings {
-            screen: SettingsScreen::new(name, profile.clone(), self.settings.vsync, ui::gfx::is_dark()),
-            key,
-            original: profile,
-            from_pause,
-        });
+        let screen = SettingsScreen::new(game, self.settings.vsync, ui::gfx::is_dark(), from_pause);
+        let original = screen.profile.clone();
+        self.modal = Some(Modal::Settings { screen, key, original, from_pause });
+        self.input.clear_events();
     }
 
     fn set_vsync(&mut self, on: bool) {
@@ -862,7 +978,7 @@ impl App {
                 PauseAction::Settings => {
                     if let Some(s) = &self.session {
                         let (k, n) = (s.key.clone(), s.name.clone());
-                        self.open_settings(k, n, true);
+                        self.open_settings(Some((k, n)), true);
                     }
                 }
                 PauseAction::SetCover => {
@@ -879,27 +995,40 @@ impl App {
             },
             Some(Modal::Settings { mut screen, key, original, from_pause }) => {
                 let result = screen.update(events, dt);
-                if let Some(s) = self.session.as_mut().filter(|s| s.key == key) {
+                if let Some(s) = self.session.as_mut().filter(|s| key.as_deref() == Some(s.key.as_str())) {
                     if matches!(result, SettingsResult::Changed | SettingsResult::Close) {
                         s.apply_profile(screen.profile.clone());
                     }
                 }
                 match result {
                     SettingsResult::Close => {
-                        if screen.profile != original {
-                            self.settings.save_profile(&key, &screen.profile);
-                            self.lib_screen.invalidate_profile(&key);
+                        if let Some(key) = key.as_deref().filter(|_| screen.profile != original) {
+                            self.settings.save_profile(key, &screen.profile);
+                            self.lib_screen.invalidate_profile(key);
                         }
                         self.set_vsync(screen.vsync);
                         if self.settings.dark_mode != screen.dark_mode {
                             self.settings.dark_mode = screen.dark_mode;
                             self.settings.save();
                         }
-                        self.modal = from_pause.then(|| Modal::Pause(PauseMenu::new()));
+                        self.modal = from_pause.then(|| Modal::Pause(PauseMenu::new(self.standalone)));
                         self.input.clear_events();
                     }
-                    SettingsResult::MakeBubble => {
-                        self.make_bubble(&key);
+                    SettingsResult::AddBubble => {
+                        // Close the settings as Done would, then show the bubble.
+                        if let Some(k) = key.as_deref().filter(|_| screen.profile != original) {
+                            self.settings.save_profile(k, &screen.profile);
+                            self.lib_screen.invalidate_profile(k);
+                        }
+                        self.set_vsync(screen.vsync);
+                        if let Some(i) = key.as_deref().and_then(|k| self.lib.index_of(k)) {
+                            self.open_bubble(i);
+                        }
+                    }
+                    SettingsResult::RefreshCatalog => {
+                        let fetcher = self.fetcher.get_or_insert_with(Fetcher::spawn);
+                        self.explore.refresh(fetcher);
+                        self.toast = Some(Toast::new("Refreshing the Explore catalog\u{2026}"));
                         self.modal = Some(Modal::Settings { screen, key, original, from_pause });
                     }
                     SettingsResult::MakeDefault => {
@@ -912,6 +1041,28 @@ impl App {
                     _ => self.modal = Some(Modal::Settings { screen, key, original, from_pause }),
                 }
             }
+            Some(Modal::Bubble(mut prompt)) => match prompt.update(events) {
+                BubbleAction::Close => self.input.clear_events(),
+                BubbleAction::Retry => {
+                    self.settings.bubble_install_denied = false;
+                    self.settings.save();
+                    self.toast = Some(Toast::lasting("OK: add the bubble again from Options", 4000));
+                    self.input.clear_events();
+                }
+                BubbleAction::HideHelp => {
+                    self.settings.hide_bubble_help = true;
+                    self.settings.save();
+                    self.toast = Some(Toast::new("OK, next time it just says where the file went"));
+                    self.input.clear_events();
+                }
+                BubbleAction::Add | BubbleAction::None => {
+                    if matches!(prompt.stage, BubbleStage::Working { drawn: true }) {
+                        self.add_bubble(prompt);
+                    } else {
+                        self.modal = Some(Modal::Bubble(prompt));
+                    }
+                }
+            },
             None => match &mut self.mode {
                 Mode::Library if self.tab == Tab::Explore => self.update_explore(events, dt),
                 Mode::Library => match self.lib_screen.update(events, &self.lib, dt) {
@@ -920,8 +1071,9 @@ impl App {
                     LibAction::Settings(i) => {
                         let g = &self.lib.games[i];
                         let (k, n) = (g.key.clone(), g.title().to_owned());
-                        self.open_settings(k, n, false);
+                        self.open_settings(Some((k, n)), false);
                     }
+                    LibAction::AppSettings => self.open_settings(None, false),
                     LibAction::ToggleSort => {
                         let key = self.lib.games.get(self.lib_screen.selected).map(|g| g.key.clone());
                         self.settings.sort = match self.settings.sort {
@@ -935,15 +1087,6 @@ impl App {
                         }
                     }
                     LibAction::SwitchTab(tab) => self.switch_tab(tab),
-                    LibAction::Rescan => {
-                        self.rescan_library();
-                        let n = self.lib.games.len();
-                        self.toast = Some(Toast::new(match n {
-                            0 => "No games found".to_owned(),
-                            1 => "Found 1 game".to_owned(),
-                            n => format!("Found {n} games"),
-                        }));
-                    }
                 },
                 Mode::Loading(ls) => {
                     if ls.update(events) {
@@ -957,17 +1100,51 @@ impl App {
         }
     }
 
-    /// Re-reads the games folder, keeping the selection.
-    fn rescan_library(&mut self) {
+    /// Re-reads the games folder, keeping the selection. Returns whether
+    /// anything changed.
+    fn rescan_library(&mut self) -> bool {
+        self.last_rescan = Instant::now();
         let key = self.lib.games.get(self.lib_screen.selected).map(|g| g.key.clone());
-        self.lib.rescan();
+        if !self.lib.rescan() {
+            return false;
+        }
         self.lib.sort(self.settings.sort);
         self.queue_analysis();
         let i = key.and_then(|k| self.lib.index_of(&k)).unwrap_or(0);
         self.lib_screen.select(i, &self.lib);
+        self.explore.refresh_owned(&self.lib);
+        true
+    }
+
+    /// Games copied over FTP or USB while RuffleVita is open show up by
+    /// themselves: every few seconds while the launcher sits still, and on
+    /// coming back to it.
+    fn rescan_now_and_then(&mut self) {
+        let still = match self.tab {
+            Tab::Library => !self.lib_screen.animating(),
+            Tab::Explore => !self.explore.animating(),
+        };
+        if !(matches!(self.mode, Mode::Library)
+            && self.modal.is_none()
+            && still
+            && self.last_input.elapsed() > Duration::from_secs(1)
+            && self.last_rescan.elapsed() > Duration::from_secs(5))
+        {
+            return;
+        }
+        self.last_rescan = Instant::now();
+        let started = Instant::now();
+        let changed = self.lib.files_changed();
+        if started.elapsed() > Duration::from_millis(30) {
+            tracing::info!("checking the games folder took {} ms", started.elapsed().as_millis());
+        }
+        if changed && self.rescan_library() {
+            self.busy_until = Instant::now() + Duration::from_millis(600);
+        }
     }
 
     fn switch_tab(&mut self, tab: Tab) {
+        self.rescan_library();
         if tab == Tab::Explore {
             let fetcher = self.fetcher.get_or_insert_with(Fetcher::spawn);
             self.explore.open(fetcher, &self.lib);
@@ -1009,8 +1186,14 @@ impl App {
             }
             ExploreAction::CancelDownload => fetcher.cancel_download(),
             ExploreAction::Play(file_name) => {
-                let found = self.lib.games.iter().position(|g| {
-                    g.path.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&file_name))
+                let find = |lib: &Library| {
+                    lib.games.iter().position(|g| {
+                        g.path.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&file_name))
+                    })
+                };
+                let found = find(&self.lib).or_else(|| {
+                    self.rescan_library();
+                    find(&self.lib)
                 });
                 match found {
                     Some(i) => {
@@ -1018,7 +1201,7 @@ impl App {
                         self.lib_screen.select(i, &self.lib);
                         self.start_game(i);
                     }
-                    None => self.toast = Some(Toast::new("Refresh the library to see this game")),
+                    None => self.toast = Some(Toast::new("This game isn't in the games folder any more")),
                 }
             }
         }
@@ -1064,6 +1247,7 @@ impl App {
                 menu.draw(g, &name, fps);
             }
             Some(Modal::Settings { screen, .. }) => screen.draw(g),
+            Some(Modal::Bubble(prompt)) => prompt.draw(g),
             None => {}
         }
         if let Some(t) = &self.toast {

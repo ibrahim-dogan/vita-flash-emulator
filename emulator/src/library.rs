@@ -121,7 +121,39 @@ fn scan_dir(root: &Path, dir: &Path, depth: u32, out: &mut Vec<(String, PathBuf,
     }
 }
 
+/// The `.swf` paths under `dir`, relative to `root`, as `scan_dir` finds
+/// them but from names alone: stat-ing every file is what makes a full scan
+/// slow on the Vita (over 100 ms for 60 games).
+fn list_names(root: &Path, dir: &Path, depth: u32, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let swf = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("swf"));
+        if swf {
+            out.push(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/"));
+        } else if depth < 2 {
+            // A folder, or another file that read_dir turns down.
+            list_names(root, &path, depth + 1, out);
+        }
+    }
+}
+
 impl Library {
+    /// Whether games were added, removed or renamed since the last scan.
+    pub fn files_changed(&self) -> bool {
+        let root = platform::games_dir();
+        let mut names = Vec::new();
+        list_names(&root, &root, 0, &mut names);
+        let mut known: Vec<&str> = self.games.iter().map(|g| g.key.as_str()).collect();
+        names.sort();
+        known.sort();
+        names.iter().map(String::as_str).ne(known.into_iter())
+    }
+
     pub fn load() -> Self {
         let db = config::read_ron(&db_path()).unwrap_or_default();
         let mut lib = Library { games: Vec::new(), db, dirty: false };
@@ -130,7 +162,9 @@ impl Library {
     }
 
     /// Re-reads the games directory (cheap: directory listing + stat only).
-    pub fn rescan(&mut self) {
+    /// Returns whether any game appeared, went or changed.
+    pub fn rescan(&mut self) -> bool {
+        let mut seen: Vec<(String, u64, i64)> = self.games.iter().map(|g| (g.key.clone(), g.db.size, g.db.mtime)).collect();
         let root = platform::games_dir();
         let mut found = Vec::new();
         scan_dir(&root, &root, 0, &mut found);
@@ -166,6 +200,10 @@ impl Library {
         for g in &self.games {
             self.db.insert(g.key.clone(), g.db.clone());
         }
+        let mut after: Vec<(String, u64, i64)> = self.games.iter().map(|g| (g.key.clone(), g.db.size, g.db.mtime)).collect();
+        seen.sort();
+        after.sort();
+        seen != after
     }
 
     /// Queues analysis for games we know nothing about yet.

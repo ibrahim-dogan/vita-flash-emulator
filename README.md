@@ -53,7 +53,7 @@ ux0:data/FlashGames/
 - The file name becomes the game's title in the library (underscores turn into spaces).
 - Some games are split into several files, such as a loader plus the main SWF, level data or XML. Keep all of them in the same folder, as they came.
 - Portal "loader" SWFs often try to download the real game from a website that no longer exists. Games can't go online, so RuffleVita looks for a file with the same name in the game's folder instead. If that file is missing, RuffleVita tells you which one.
-- Added games while RuffleVita is open? Press **SELECT** in the library to refresh.
+- Added games while RuffleVita is open (over FTP, say)? They show up in the library by themselves within a few seconds.
 
 RuffleVita keeps its own data in **`ux0:data/rufflevita/`**: settings, per-game profiles, covers, game saves, the Explore catalog and `log.txt`.
 
@@ -61,7 +61,7 @@ RuffleVita keeps its own data in **`ux0:data/rufflevita/`**: settings, per-game 
 
 Press **R** in the library to open **Explore**: about 6,000 Flash games from the [Silvergames](https://www.silvergames.com) archive at `files.silvergames.com/flash/`. It needs Wi-Fi.
 
-- The catalog downloads the first time you open Explore and is saved on the memory card; it refreshes once a week, or when you press **SELECT**.
+- The catalog downloads the first time you open Explore and is saved on the memory card; it refreshes once a week, or from Options → General → *Refresh the Explore catalog*.
 - Press **△** to search with the Vita's keyboard and **○** to clear the search. **□** sorts by name, newest or smallest.
 - Rest on a game for a moment and RuffleVita reads its first 16 KB to show its ActionScript version, stage size and frame rate before you download it. Only about one in six games still has cover art on Silvergames; the rest get a cover made from their name.
 - **✕** downloads the game into `ux0:data/FlashGames/`, where it shows up in the library. **✕** again cancels the download, and on a game you already have it starts playing.
@@ -73,9 +73,9 @@ Version 1.0.0 was released as FlashVita. RuffleVita installs as a new app next t
 
 ## Controls
 
-**Library:** D-pad up/down (or the left stick) to browse, left/right to page, ✕ to play, △ for game settings, □ to sort (recent / A–Z), SELECT to refresh, **L/R to switch between Library and Explore**. You can also tap a game to select it and tap again to play.
+**Library:** D-pad up/down (or the left stick) to browse, left/right to page, ✕ to play, △ for game settings, □ to sort (recent / A–Z), **L/R to switch between Library and Explore**. You can also tap a game to select it and tap again to play.
 
-**Explore:** the same, with △ to search, ○ to clear the search, □ to sort, ✕ to download (or cancel, or play) and SELECT to refresh the catalog.
+**Explore:** the same, with △ to search, ○ to clear the search, □ to sort, ✕ to download (or cancel, or play).
 
 **In game (defaults, change them per game):**
 
@@ -90,7 +90,9 @@ Version 1.0.0 was released as FlashVita. RuffleVita installs as a new app next t
 | Front touch screen | Mouse (tap to click, drag to drag) |
 | **L + R + START** | RuffleVita menu (always works, whatever the bindings) |
 
-Open **Game settings** from the library (△) or the pause menu. There you can bind any button to any key, a mouse click or the menu. Sticks can be arrows, WASD, mouse cursor or off. You can also change how the game fits the screen, the render quality, the physics speed, the FPS counter, the cursor speed and the rear touchpad (as a trackpad). V-Sync and **Dark mode** (for RuffleVita's own menus) apply to all games. **"Use these settings for new games"** makes the current setup your default.
+Open **Game settings** from the library (△) or the pause menu. There you can bind any button to any key, a mouse click or the menu. Sticks can be arrows, WASD, mouse cursor or off. You can also change how the game fits the screen, the render quality, the physics speed, the FPS counter, the cursor speed and the rear touchpad (as a trackpad). **"Use these settings for new games"** makes the current setup your default.
+
+The *General* tab of Options has what applies everywhere: V-Sync, **Dark mode** for RuffleVita's own menus, and refreshing the Explore catalog.
 
 ## Features
 
@@ -100,7 +102,7 @@ Open **Game settings** from the library (△) or the pause menu. There you can b
 - **Pause menu.** Resume, change settings with a live preview, set a cover, restart, or quit to the library.
 - **Saves.** Each game keeps its saves in its own folder, `ux0:data/rufflevita/saves/<Game> [id]/`. They are written when you pause or quit, and every 30 seconds while you play.
 - **Works offline.** Many games call web services that are long gone (Kongregate, MindJolt, ad and score servers). RuffleVita answers the common portal APIs itself and keeps a game running when a missing service would otherwise stop it.
-- **Home screen bubbles.** Game settings → Display → *Make a home screen bubble* saves a VPK to `ux0:data/rufflevita/bubbles/`. Install it with VitaShell and the game gets its own bubble, with its cover as the icon and LiveArea background, that opens it straight away.
+- **Home screen bubbles.** In a game's **Options → Home screen**, *Add to the home screen* gives it its own bubble, with its cover as the round icon and LiveArea background, that opens it straight away. With **Enable Unsafe Homebrew** on (Settings → HENkaku Settings) RuffleVita installs it itself in a few seconds; otherwise it saves a VPK in `ux0:data/rufflevita/bubbles/` and shows how to install it with VitaShell. A bubble carries its own copy of RuffleVita (under 10 MB) so Start goes straight into the game; saves and settings are shared. Make bubbles again after updating RuffleVita to bring them up to date.
 - **Direct launch.** HexFlow, RetroFlow and Custom Bubbles can start a game with `psgm:play?titleid=RUFFLEVIT&param=ux0:data/FlashGames/<game>.swf`.
 - **Dark mode.** A dark theme for the library, Explore and settings.
 - **Tuned for the Vita.** Frame pacing that follows the game's own frame rate (no busy looping), CPU at 444 MHz and GPU at 222 MHz, and a GLES2 renderer optimised for vitaGL.
@@ -178,6 +180,7 @@ The LiveArea artwork is rendered by the app itself (`RUFFLEVITA_RENDER_ASSETS=/t
 - [Rinnegatamante](https://github.com/Rinnegatamante): vitaGL and vitaShaRK
 - [Northfear/SDL](https://github.com/Northfear/SDL): SDL2 with the vitaGL backend
 - [vita-rust](https://github.com/vita-rust): Rust toolchain for the Vita
+- [VitaShell](https://github.com/TheOfficialFloW/VitaShell) by TheFloW: how to install an app with the system's promoter, and the package header template home screen bubbles use
 - [Lilita One](https://fonts.google.com/specimen/Lilita+One) by Juan Montoreano and [Nunito](https://github.com/googlefonts/nunito) by Vernon Adams, Cyreal and Jacques Le Bailly: UI fonts, with [Inter](https://rsms.me/inter/) for symbols (all SIL Open Font License)
 - [Silvergames](https://www.silvergames.com): hosts the Flash archive Explore browses
 

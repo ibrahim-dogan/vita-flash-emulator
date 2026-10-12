@@ -7,9 +7,11 @@ edition = "2024"
 [dependencies]
 # Screenshots for RUFFLEVITA_SCRIPT (also on the Vita, for automated testing).
 png = "0.18"
-# Home screen bubbles (src/bubble.rs): 8-bit palette PNGs and the VPK zip.
+# Home screen bubbles (src/bubble.rs): 8-bit palette PNGs, the VPK zip and
+# head.bin's digests.
 color_quant = "1.1"
 crc32fast = "1"
+sha1_smol = "1"
 sdl2 = { version = "0.38.0", features = ["static-link", "use-pkgconfig"] }
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle", rev = "563854a8911eda672b1836fb374063162879035d", features = [
     "audio",
@@ -76,6 +78,9 @@ title_id = "RUFFLEVIT"
 title_name = "RuffleVita"
 assets = "./static/vita"
 build_std = "std,panic_unwind"
+# Safe homebrew (cargo-vita's default "-s"), compressed: the eboot shrinks
+# from 27 MB to under 10, and every home screen bubble carries a copy.
+vita_make_fself_flags = ["-s", "-c"]
 
 [package.metadata.vita.profile.vita]
 strip_symbols = true
