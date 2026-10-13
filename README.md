@@ -172,6 +172,10 @@ The LiveArea artwork is rendered by the app itself (`RUFFLEVITA_RENDER_ASSETS=/t
 | `emulator/patches/ruffle/` | Ruffle's core with performance and memory fixes for the Vita |
 | `emulator/patches/jpeg-decoder/` | Single-threaded JPEG decoding on the Vita |
 
+## AI disclosure
+
+RuffleVita is built with AI help. Much of its code, documentation and release notes were written with [Claude Code](https://claude.com/claude-code) (Anthropic's Claude), working under İbrahim Doğan's direction, who decides what goes in; every release is tested on a real PS Vita before it ships. The repository's first commit carries Claude's co-author line as the record of this; later commits don't repeat it.
+
 ## Credits
 
 - **İbrahim Doğan**: RuffleVita (app, UI, input mapping, library, renderer work)

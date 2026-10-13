@@ -131,7 +131,7 @@ Box2D's `b2World.Step(dt, velocityIterations, positionIterations)`: `SolvePositi
 - Correctness gate for every change under `avm2/`: `shot` at two frames (e.g. `at 900; shot a.png; at 1400; shot b.png`) with and without `RUFFLEVITA_NO_AOT=1`, compare with `cmp`. Any byte differs → bug, stop.
 - Native profile: `sample <pid> 3 1 -mayDie`. Note that `shot` writes its file at the end of the run, so use a log line as the trigger (the last `Drawing into 2297x2000 texture` line marks the end of level load) rather than waiting for a screenshot file.
 - Vita A/B: `autorun.txt` with `RUFFLEVITA_AUTOSTART`, `RUFFLEVITA_BENCH`, `RUFFLEVITA_SCRIPT`, optional `RUFFLEVITA_NO_AOT=1`; `nosleep on; screen on` first; read the BENCH line from `ux0:data/rufflevita/log.txt`. A Docker build takes ~20 minutes, so batch Vita runs: only go to the Vita after a desktop win of ≥3% instructions, or for T4/T5 which can only be measured there.
-- Don't commit unless asked. Don't add Claude attribution anywhere.
+- Don't commit unless asked.
 
 ## 5. Results log
 
