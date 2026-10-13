@@ -174,7 +174,7 @@ The LiveArea artwork is rendered by the app itself (`RUFFLEVITA_RENDER_ASSETS=/t
 
 ## AI disclosure
 
-RuffleVita is built with AI help. Much of its code, documentation and release notes were written with [Claude Code](https://claude.com/claude-code) (Anthropic's Claude), working under İbrahim Doğan's direction, who decides what goes in; every release is tested on a real PS Vita before it ships. The repository's first commit carries Claude's co-author line as the record of this; later commits don't repeat it.
+RuffleVita is built with AI help. Much of its code, documentation and release notes were written with [Claude Code](https://claude.com/claude-code) (Anthropic's Claude), with İbrahim Doğan deciding what goes in and testing every release on a real PS Vita before it ships. The repository's first commit carries Claude's co-author line as the record of this; later commits don't repeat it.
 
 ## Credits
 
